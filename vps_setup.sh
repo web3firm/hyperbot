@@ -16,6 +16,9 @@ sudo apt install -y screen git python3 python3-pip python3-venv
 echo "🐍 Creating virtual environment..."
 python3 -m venv venv
 
+# Create logs directory
+mkdir -p logs
+
 # Activate venv and install dependencies
 echo "📦 Installing Python dependencies..."
 source venv/bin/activate

@@ -43,6 +43,9 @@ from app.risk.drawdown_monitor import DrawdownMonitor
 # Import Telegram bot
 from app.telegram_bot import TelegramBot
 
+# Create logs directory if it doesn't exist
+Path('logs').mkdir(exist_ok=True)
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
