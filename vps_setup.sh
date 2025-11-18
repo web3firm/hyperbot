@@ -12,9 +12,16 @@ sudo apt update && sudo apt upgrade -y
 echo "🔧 Installing required tools..."
 sudo apt install -y screen git python3 python3-pip python3-venv
 
-# Install Python dependencies
-echo "🐍 Installing Python dependencies..."
-pip3 install -r requirements.txt
+# Create virtual environment
+echo "🐍 Creating virtual environment..."
+python3 -m venv venv
+
+# Activate venv and install dependencies
+echo "📦 Installing Python dependencies..."
+source venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+deactivate
 
 # Make scripts executable
 chmod +x check_bot.sh
@@ -26,7 +33,8 @@ echo "📋 Next Steps:"
 echo "1. Configure your .env file with your API keys"
 echo "2. Run bot in screen session:"
 echo "   screen -S hyperbot"
-echo "   python3 -m app.bot"
+echo "   source venv/bin/activate"
+echo "   python -m app.bot"
 echo "   Press Ctrl+A then D to detach"
 echo ""
 echo "3. Reattach to session:"

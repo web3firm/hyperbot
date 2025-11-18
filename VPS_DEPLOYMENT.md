@@ -62,8 +62,11 @@ Screen keeps your bot running even after you disconnect from SSH.
 # Start new screen session named "hyperbot"
 screen -S hyperbot
 
+# Activate virtual environment
+source venv/bin/activate
+
 # Run the bot
-python3 -m app.bot
+python -m app.bot
 
 # Bot is now running! To detach and keep it running:
 # Press: Ctrl+A, then press D
