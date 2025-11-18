@@ -302,6 +302,25 @@ class HyperAIBot:
                     should_close = False
                     close_reason = ""
                     
+                    # **TRAILING STOP-LOSS LOGIC** - Lock in profits!
+                    # If P&L reaches 3%+, move SL to breakeven or better
+                    if unrealized_pnl_pct >= 3.0:  # Reached 50% of 6% target
+                        # Calculate breakeven + buffer
+                        if is_long:
+                            # Move SL to breakeven + 1% profit locked
+                            trailing_sl = entry_price * Decimal('1.005')  # +0.5% from entry (2.5% profit with 5x)
+                            if sl_price and trailing_sl > sl_price:
+                                logger.info(f"🔒 TRAILING SL: Locking profit at {unrealized_pnl_pct:.1f}% - Moving SL from ${sl_price:.3f} to ${trailing_sl:.3f}")
+                                # Update target
+                                targets['sl_price'] = trailing_sl
+                                # Cancel old SL and place new one (simplified - emergency backup handles it)
+                        else:
+                            # Short position - move SL down
+                            trailing_sl = entry_price * Decimal('0.995')  # -0.5% from entry
+                            if sl_price and trailing_sl < sl_price:
+                                logger.info(f"🔒 TRAILING SL: Locking profit at {unrealized_pnl_pct:.1f}% - Moving SL from ${sl_price:.3f} to ${trailing_sl:.3f}")
+                                targets['sl_price'] = trailing_sl
+                    
                     # Check if SL breached
                     if sl_price:
                         if is_long and current_price <= sl_price:
