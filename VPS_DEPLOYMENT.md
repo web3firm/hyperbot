@@ -7,8 +7,8 @@
 # Update system
 sudo apt update && sudo apt upgrade -y
 
-# Install Python 3.11+
-sudo apt install python3.11 python3.11-venv python3-pip git -y
+# Install Python 3.11+ and Screen
+sudo apt install python3.11 python3.11-venv python3-pip git screen -y
 
 # Clone repository
 git clone https://github.com/YOUR_USERNAME/hyperbot.git
@@ -54,7 +54,41 @@ BOT_MODE=rule_based
 SYMBOL=HYPE
 ```
 
-### 4. Start Bot (Systemd Service - Recommended)
+### 4. Start Bot with Screen (Easiest Method) ⭐
+
+Screen keeps your bot running even after you disconnect from SSH.
+
+```bash
+# Start new screen session named "hyperbot"
+screen -S hyperbot
+
+# Run the bot
+python3 -m app.bot
+
+# Bot is now running! To detach and keep it running:
+# Press: Ctrl+A, then press D
+
+# You can now safely close SSH - bot keeps running!
+```
+
+**Screen Management Commands:**
+```bash
+# List all screen sessions
+screen -ls
+
+# Reattach to running bot
+screen -r hyperbot
+
+# Kill/stop the bot session
+screen -XS hyperbot quit
+
+# Inside screen: Stop bot gracefully
+# Press: Ctrl+C, then type: exit
+```
+
+### 5. Alternative: Systemd Service (Auto-Restart)
+
+If you want the bot to auto-restart on crashes or VPS reboot:
 
 Create service file:
 ```bash
@@ -98,24 +132,6 @@ sudo systemctl status hyperbot
 
 # View logs
 journalctl -u hyperbot -f
-```
-
-### 5. Alternative: Screen/Tmux Method
-```bash
-# Install screen
-sudo apt install screen -y
-
-# Start screen session
-screen -S hyperbot
-
-# Activate venv and run bot
-cd /home/YOUR_USERNAME/hyperbot
-source venv/bin/activate
-python -m app.bot
-
-# Detach: Ctrl+A, then D
-# Reattach: screen -r hyperbot
-# Kill session: screen -X -S hyperbot quit
 ```
 
 ### 6. Monitoring Commands
