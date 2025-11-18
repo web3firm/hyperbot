@@ -73,6 +73,7 @@ class TelegramBot:
             self.application.add_handler(CommandHandler("trades", self._cmd_trades))
             self.application.add_handler(CommandHandler("pnl", self._cmd_pnl))
             self.application.add_handler(CommandHandler("stats", self._cmd_stats))
+            self.application.add_handler(CommandHandler("logs", self._cmd_logs))
             self.application.add_handler(CommandHandler("help", self._cmd_help))
             self.application.add_handler(CallbackQueryHandler(self._handle_callback))
             
@@ -151,6 +152,9 @@ class TelegramBot:
             ],
             [
                 InlineKeyboardButton("📊 Stats", callback_data="stats"),
+                InlineKeyboardButton("📝 Logs", callback_data="logs")
+            ],
+            [
                 InlineKeyboardButton("❓ Help", callback_data="help")
             ]
         ]
@@ -390,6 +394,73 @@ class TelegramBot:
         except Exception as e:
             await update.message.reply_text(f"Error fetching statistics: {e}")
     
+    async def _cmd_logs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /logs command - show recent bot logs"""
+        try:
+            from datetime import datetime
+            import os
+            
+            # Get today's log file
+            log_date = datetime.now().strftime('%Y%m%d')
+            log_file = f"/workspaces/hyperbot/logs/bot_{log_date}.log"
+            
+            if not os.path.exists(log_file):
+                await update.message.reply_text(f"📭 No log file found for today ({log_date})")
+                return
+            
+            # Read last 50 lines
+            with open(log_file, 'r') as f:
+                lines = f.readlines()
+                last_lines = lines[-50:] if len(lines) > 50 else lines
+            
+            # Filter and format logs
+            formatted_logs = []
+            for line in last_lines:
+                # Extract key parts
+                if ' - INFO - ' in line:
+                    emoji = "ℹ️"
+                elif ' - WARNING - ' in line:
+                    emoji = "⚠️"
+                elif ' - ERROR - ' in line:
+                    emoji = "❌"
+                else:
+                    continue
+                
+                # Extract timestamp and message
+                parts = line.split(' - ', 3)
+                if len(parts) >= 4:
+                    time = parts[0].split(' ')[1].split(',')[0]  # Extract HH:MM:SS
+                    msg = parts[3].strip()
+                    
+                    # Truncate long messages
+                    if len(msg) > 100:
+                        msg = msg[:97] + "..."
+                    
+                    formatted_logs.append(f"{emoji} `{time}` {msg}")
+            
+            # Split into chunks if too long (Telegram has 4096 char limit)
+            log_text = "\n".join(formatted_logs[-30:])  # Last 30 formatted lines
+            
+            message = (
+                f"📝 *LIVE LOGS* (Last 30 entries)\n\n"
+                f"{log_text}\n\n"
+                f"_Full logs: logs/bot_{log_date}.log_"
+            )
+            
+            # Handle message length
+            if len(message) > 4000:
+                # Split into multiple messages
+                chunks = [formatted_logs[i:i+15] for i in range(0, len(formatted_logs[-30:]), 15)]
+                for i, chunk in enumerate(chunks):
+                    chunk_msg = f"📝 *LIVE LOGS* (Part {i+1}/{len(chunks)})\n\n" + "\n".join(chunk)
+                    await update.message.reply_text(chunk_msg, parse_mode='Markdown')
+            else:
+                await update.message.reply_text(message, parse_mode='Markdown')
+            
+        except Exception as e:
+            logger.error(f"Error in /logs command: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error reading logs: {str(e)[:100]}")
+    
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /help command"""
         message = (
@@ -399,7 +470,8 @@ class TelegramBot:
             "/positions - Active open positions\n"
             "/trades - Last 10 completed trades\n"
             "/pnl - Daily and weekly PnL\n"
-            "/stats - Performance statistics\n\n"
+            "/stats - Performance statistics\n"
+            "/logs - Recent live logs (last 50 lines)\n\n"
             "*Control:*\n"
             "Use the inline buttons for:\n"
             "🚀 START - Resume trading\n"

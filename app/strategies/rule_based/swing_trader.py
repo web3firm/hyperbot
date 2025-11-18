@@ -73,7 +73,10 @@ class SwingTradingStrategy:
         self.rsi_pullback_short_high = 65
         self.min_volume_ratio = Decimal('1.2')  # Institutional standard (was 1.5 - too restrictive)
         self.min_adx = 25  # Strong trend required (>25 = trending market)
-        self.min_signal_score = 5  # Require 5/8 points (was 4/7)
+        self.min_signal_score = 6  # Require 6/8 points (75% threshold for higher quality)
+        self.min_atr_pct = Decimal('0.5')  # Minimum ATR % (volatility filter to avoid choppy markets)
+        self.trading_hours_start = 8  # UTC 8am
+        self.trading_hours_end = 16   # UTC 4pm (high liquidity period)
         
         # State tracking
         self.recent_prices = deque(maxlen=100)  # Need 100 for indicators
@@ -91,13 +94,14 @@ class SwingTradingStrategy:
         self.signals_generated = 0
         self.trades_executed = 0
         
-        logger.info(f"📈 ENTERPRISE Swing Trading Strategy initialized for {symbol}")
-        logger.info(f"   🎯 TARGET: 70% Win Rate | 3:1 R:R")
+        logger.info(f"📈 ULTRA-QUALITY Swing Trading Strategy initialized for {symbol}")
+        logger.info(f"   🎯 TARGET: 75% Win Rate | 3:1 R:R")
         logger.info(f"   Leverage: {self.leverage}x")
         logger.info(f"   TP: +{self.tp_pct}% PnL | SL: -{self.sl_pct}% PnL")
         logger.info(f"   R:R Ratio: 1:{float(self.tp_pct/self.sl_pct)}")
         logger.info(f"   RSI: {self.rsi_oversold}/{self.rsi_overbought} | EMA: {self.ema_fast}/{self.ema_slow}")
-        logger.info(f"   ADX: >{self.min_adx} (trend strength) | Score: {self.min_signal_score}/8")
+        logger.info(f"   ADX: >{self.min_adx} (trend) | Score: {self.min_signal_score}/8 (75%)")
+        logger.info(f"   ATR: >{self.min_atr_pct}% (volatility) | Hours: {self.trading_hours_start}-{self.trading_hours_end} UTC")
     
     def _calculate_rsi(self, prices: List[Decimal], period: int = 14) -> Optional[Decimal]:
         """Calculate RSI indicator"""
@@ -434,6 +438,20 @@ class SwingTradingStrategy:
         
         if signal_type is None:
             return None  # No valid setup
+        
+        # === VOLATILITY FILTER (ATR % check) ===
+        atr = self._calculate_atr()
+        if atr:
+            atr_pct = (atr / current_price) * 100
+            if atr_pct < self.min_atr_pct:
+                logger.info(f"⏭️ Skipping signal - Low volatility (ATR: {atr_pct:.2f}% < {self.min_atr_pct}%)")
+                return None
+        
+        # === TIME-OF-DAY FILTER (High liquidity hours) ===
+        current_hour = datetime.now(timezone.utc).hour
+        if not (self.trading_hours_start <= current_hour < self.trading_hours_end):
+            logger.info(f"⏭️ Skipping signal - Outside trading hours (Current: {current_hour}:00 UTC, Allowed: {self.trading_hours_start}-{self.trading_hours_end} UTC)")
+            return None
         
         # Check if already in position
         positions = account_state.get('positions', [])
