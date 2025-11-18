@@ -43,6 +43,9 @@ from app.risk.drawdown_monitor import DrawdownMonitor
 # Import Telegram bot
 from app.telegram_bot import TelegramBot
 
+# Import error handler
+from app.utils.error_handler import ErrorHandler
+
 # Create logs directory if it doesn't exist
 Path('logs').mkdir(exist_ok=True)
 
@@ -96,6 +99,9 @@ class HyperAIBot:
         
         # Telegram bot
         self.telegram_bot: Optional[TelegramBot] = None
+        
+        # Error handler
+        self.error_handler: Optional[ErrorHandler] = None
         
         # Account tracking (simplified portfolio manager)
         self.account_value = Decimal('0')
@@ -210,6 +216,10 @@ class HyperAIBot:
                     }
                     self.telegram_bot = TelegramBot(self, config)
                     await self.telegram_bot.start()
+                    
+                    # Initialize error handler with Telegram
+                    self.error_handler = ErrorHandler(self.telegram_bot)
+                    logger.info("🛡️ Error handler initialized with Telegram notifications")
                     
                     # Start auto-trainer background task
                     logger.info("🤖 Starting ML auto-trainer...")
@@ -576,6 +586,11 @@ class HyperAIBot:
                     
                 except Exception as e:
                     logger.error(f"❌ Loop error: {e}", exc_info=True)
+                    
+                    # Notify via error handler
+                    if self.error_handler:
+                        await self.error_handler.handle_critical_error(e, "Trading Loop Iteration")
+                    
                     await asyncio.sleep(5)
         
         finally:
