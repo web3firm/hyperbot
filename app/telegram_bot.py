@@ -74,6 +74,7 @@ class TelegramBot:
             self.application.add_handler(CommandHandler("pnl", self._cmd_pnl))
             self.application.add_handler(CommandHandler("stats", self._cmd_stats))
             self.application.add_handler(CommandHandler("logs", self._cmd_logs))
+            self.application.add_handler(CommandHandler("train", self._cmd_train))
             self.application.add_handler(CommandHandler("help", self._cmd_help))
             self.application.add_handler(CallbackQueryHandler(self._handle_callback))
             
@@ -153,6 +154,9 @@ class TelegramBot:
             [
                 InlineKeyboardButton("📊 Stats", callback_data="stats"),
                 InlineKeyboardButton("📝 Logs", callback_data="logs")
+            ],
+            [
+                InlineKeyboardButton("🤖 Train ML", callback_data="train")
             ],
             [
                 InlineKeyboardButton("❓ Help", callback_data="help")
@@ -461,6 +465,46 @@ class TelegramBot:
             logger.error(f"Error in /logs command: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Error reading logs: {str(e)[:100]}")
     
+    async def _cmd_train(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /train command - trigger ML retraining"""
+        try:
+            await update.message.reply_text(
+                "🤖 *ML TRAINING CHECK*\n\n"
+                "Checking if retraining is needed...\n"
+                "This may take a few moments.",
+                parse_mode='Markdown'
+            )
+            
+            # Import auto-trainer
+            from ml.auto_trainer import AutoTrainer
+            trainer = AutoTrainer(min_trades_for_retrain=100)
+            
+            # Check and train
+            triggered = await trainer.check_and_train(self)
+            
+            if not triggered:
+                # Get current stats
+                current_count = trainer._count_trades()
+                new_trades = current_count - trainer.last_trade_count
+                needed = trainer.min_trades - new_trades
+                
+                await update.message.reply_text(
+                    f"ℹ️ *TRAINING NOT NEEDED*\n\n"
+                    f"New trades: {new_trades}/{trainer.min_trades}\n"
+                    f"Need {needed} more trades for retraining.\n\n"
+                    f"Auto-training runs every 24 hours.",
+                    parse_mode='Markdown'
+                )
+            
+        except Exception as e:
+            logger.error(f"Error in /train command: {e}", exc_info=True)
+            await update.message.reply_text(
+                f"❌ *TRAINING ERROR*\n\n"
+                f"Failed to trigger training: {str(e)[:200]}\n\n"
+                f"Check logs for details.",
+                parse_mode='Markdown'
+            )
+    
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /help command"""
         message = (
@@ -472,6 +516,8 @@ class TelegramBot:
             "/pnl - Daily and weekly PnL\n"
             "/stats - Performance statistics\n"
             "/logs - Recent live logs (last 50 lines)\n\n"
+            "*ML Training:*\n"
+            "/train - Trigger ML model retraining\n\n"
             "*Control:*\n"
             "Use the inline buttons for:\n"
             "🚀 START - Resume trading\n"

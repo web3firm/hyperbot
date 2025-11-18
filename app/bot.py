@@ -210,6 +210,13 @@ class HyperAIBot:
                     }
                     self.telegram_bot = TelegramBot(self, config)
                     await self.telegram_bot.start()
+                    
+                    # Start auto-trainer background task
+                    logger.info("🤖 Starting ML auto-trainer...")
+                    from ml.auto_trainer import AutoTrainer
+                    self.auto_trainer = AutoTrainer(min_trades_for_retrain=100)
+                    asyncio.create_task(self.auto_trainer.schedule_daily_check(self.telegram_bot))
+                    
                 except Exception as e:
                     logger.warning(f"⚠️ Telegram bot initialization failed: {e}")
                     self.telegram_bot = None
