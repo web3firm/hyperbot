@@ -46,6 +46,9 @@ from app.telegram_bot import TelegramBot
 # Import error handler
 from app.utils.error_handler import ErrorHandler
 
+# Import database
+from app.database.db_manager import DatabaseManager
+
 # Create logs directory if it doesn't exist
 Path('logs').mkdir(exist_ok=True)
 
@@ -102,6 +105,9 @@ class HyperAIBot:
         
         # Error handler
         self.error_handler: Optional[ErrorHandler] = None
+        
+        # Database
+        self.db: Optional[DatabaseManager] = None
         
         # Account tracking (simplified portfolio manager)
         self.account_value = Decimal('0')
@@ -610,7 +616,64 @@ class HyperAIBot:
                 }
             }
             
-            # Save to daily trade log
+            # Log to database if available
+            if self.db:
+                try:
+                    # Insert signal with indicators
+                    indicators = {
+                        'rsi': market_data.get('rsi'),
+                        'macd': market_data.get('macd'),
+                        'macd_signal': market_data.get('macd_signal'),
+                        'macd_histogram': market_data.get('macd_histogram'),
+                        'ema_9': market_data.get('ema_9'),
+                        'ema_21': market_data.get('ema_21'),
+                        'ema_50': market_data.get('ema_50'),
+                        'adx': market_data.get('adx'),
+                        'atr': market_data.get('atr'),
+                        'volume': market_data.get('volume')
+                    }
+                    
+                    signal_id = await self.db.insert_signal(
+                        symbol=signal.get('symbol', self.symbol),
+                        signal_type=signal.get('signal', 'BUY'),
+                        price=float(signal.get('price', 0)),
+                        confidence_score=float(signal.get('confidence', 0)),
+                        indicators=indicators,
+                        volatility=market_data.get('volatility'),
+                        liquidity_score=market_data.get('liquidity_score')
+                    )
+                    
+                    # Insert trade
+                    if result.get('executed'):
+                        trade_id = await self.db.insert_trade(
+                            symbol=signal.get('symbol', self.symbol),
+                            signal_type=signal.get('signal', 'BUY'),
+                            entry_price=float(result.get('entry_price', 0)),
+                            quantity=float(result.get('quantity', 0)),
+                            confidence_score=float(signal.get('confidence', 0)),
+                            strategy_name=signal.get('strategy'),
+                            account_equity=float(self.account_value),
+                            session_pnl=float(self.session_pnl),
+                            order_id=result.get('order_id')
+                        )
+                        
+                        # Link signal to trade
+                        await self.db.mark_signal_executed(signal_id, trade_id)
+                        
+                        logger.info(f"📊 Logged to database: signal_id={signal_id}, trade_id={trade_id}")
+                    else:
+                        # Signal rejected
+                        await self.db.mark_signal_rejected(
+                            signal_id,
+                            result.get('rejection_reason', 'Unknown')
+                        )
+                        logger.info(f"📊 Signal #{signal_id} rejected: {result.get('rejection_reason')}")
+                        
+                except Exception as db_error:
+                    logger.error(f"Database logging failed: {db_error}")
+                    # Fall through to JSONL backup
+            
+            # Backup to JSONL (for now, can remove later)
             log_file = self.trade_log_path / f"trades_{datetime.now().strftime('%Y%m%d')}.jsonl"
             with open(log_file, 'a') as f:
                 f.write(json.dumps(trade_record) + '\n')
@@ -631,6 +694,10 @@ class HyperAIBot:
             # Stop websocket
             if self.websocket:
                 await self.websocket.stop()
+            
+            # Close database connection
+            if self.db:
+                await self.db.disconnect()
             
             # Log final statistics
             runtime = (datetime.now(timezone.utc) - self.start_time).total_seconds() if self.start_time else 0

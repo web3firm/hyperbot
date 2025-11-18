@@ -1,12 +1,14 @@
 """
 Dataset Builder - Convert executed trades into labeled ML training data
-Processes trade logs from data/trades/ → data/model_dataset/
+Reads from PostgreSQL database (with JSONL fallback)
 """
 
 import json
 import logging
+import os
+import asyncio
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -15,28 +17,73 @@ logger = logging.getLogger(__name__)
 class DatasetBuilder:
     """
     Builds ML training dataset from executed trade logs
+    Supports both PostgreSQL (preferred) and JSONL (fallback)
     """
     
     def __init__(self, trades_dir: str = 'data/trades', 
-                 output_dir: str = 'data/model_dataset'):
+                 output_dir: str = 'data/model_dataset',
+                 database_url: Optional[str] = None):
         """
         Initialize dataset builder
         
         Args:
-            trades_dir: Directory containing trade logs
+            trades_dir: Directory containing trade logs (fallback)
             output_dir: Output directory for ML dataset
+            database_url: PostgreSQL connection string (optional)
         """
         self.trades_dir = Path(trades_dir)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
+        self.database_url = database_url or os.getenv('DATABASE_URL')
+        self.db = None
+        
         logger.info("📊 Dataset Builder initialized")
         logger.info(f"   Trades dir: {self.trades_dir}")
         logger.info(f"   Output dir: {self.output_dir}")
+        logger.info(f"   Database: {'Connected' if self.database_url else 'JSONL fallback'}")
+    
+    async def connect_db(self):
+        """Connect to database if available"""
+        if self.database_url:
+            try:
+                from app.database.db_manager import DatabaseManager
+                self.db = DatabaseManager(self.database_url)
+                await self.db.connect()
+                logger.info("✅ Database connected for dataset building")
+            except Exception as e:
+                logger.warning(f"⚠️  Database connection failed: {e}, falling back to JSONL")
+                self.db = None
+    
+    async def disconnect_db(self):
+        """Disconnect from database"""
+        if self.db:
+            await self.db.disconnect()
+    
+    async def load_trades_from_db(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """
+        Load trades from PostgreSQL database
+        
+        Args:
+            limit: Max number of trades to load (None = all)
+        
+        Returns:
+            List of trade records with features
+        """
+        if not self.db:
+            return []
+        
+        try:
+            trades = await self.db.get_trades_for_ml(limit=limit)
+            logger.info(f"📥 Loaded {len(trades)} trades from database")
+            return trades
+        except Exception as e:
+            logger.error(f"Error loading from database: {e}")
+            return []
     
     def load_trade_logs(self) -> List[Dict[str, Any]]:
         """
-        Load all trade logs from JSONL files
+        Load all trade logs from JSONL files (fallback method)
         
         Returns:
             List of trade records
@@ -52,18 +99,52 @@ class DatasetBuilder:
             except Exception as e:
                 logger.error(f"Error loading {log_file}: {e}")
         
-        logger.info(f"📥 Loaded {len(trades)} trade records")
+        logger.info(f"📥 Loaded {len(trades)} trade records from JSONL")
         return trades
+    
+    async def build_dataset_async(self, limit: Optional[int] = None) -> pd.DataFrame:
+        """
+        Build complete training dataset (async version)
+        Tries database first, falls back to JSONL
+        
+        Args:
+            limit: Maximum number of trades to load
+        
+        Returns:
+            DataFrame with features and labels
+        """
+        # Try database first
+        await self.connect_db()
+        trades = await self.load_trades_from_db(limit=limit) if self.db else []
+        await self.disconnect_db()
+        
+        # Fall back to JSONL if database empty
+        if not trades:
+            logger.info("📁 Loading from JSONL files (fallback)")
+            trades = self.load_trade_logs()
+        
+        return self._process_trades(trades)
     
     def build_dataset(self) -> pd.DataFrame:
         """
-        Build complete training dataset
+        Build complete training dataset (sync version for compatibility)
         
         Returns:
             DataFrame with features and labels
         """
         trades = self.load_trade_logs()
+        return self._process_trades(trades)
+    
+    def _process_trades(self, trades: List[Dict[str, Any]]) -> pd.DataFrame:
+        """
+        Process trades into DataFrame
         
+        Args:
+            trades: List of trade records (from DB or JSONL)
+        
+        Returns:
+            DataFrame with features and labels
+        """
         if len(trades) < 100:
             logger.warning(f"⚠️  Only {len(trades)} trades - need at least 100 for meaningful training")
         
@@ -72,41 +153,59 @@ class DatasetBuilder:
         
         for trade in trades:
             try:
-                signal = trade.get('signal', {})
-                market = trade.get('market_data', {})
-                account = trade.get('account_state', {})
-                result = trade.get('result', {})
-                
-                record = {
-                    # Timestamp
-                    'timestamp': trade.get('timestamp'),
-                    
-                    # Signal features
-                    'signal_type': 1 if signal.get('signal_type') == 'long' else -1,
-                    'entry_price': signal.get('entry_price', 0),
-                    'size': signal.get('size', 0),
-                    'leverage': signal.get('leverage', 1),
-                    'stop_loss': signal.get('stop_loss', 0),
-                    'take_profit': signal.get('take_profit', 0),
-                    'momentum_pct': signal.get('momentum_pct', 0),
-                    
-                    # Market features
-                    'market_price': market.get('price', 0),
-                    
-                    # Account features
-                    'account_equity': account.get('equity', 0),
-                    'session_pnl': account.get('session_pnl', 0),
-                    
-                    # Result (for labeling)
-                    'success': 1 if result.get('success') else 0
-                }
-                
-                # Calculate additional features
-                if record['entry_price'] > 0:
-                    record['risk_reward_ratio'] = abs((record['take_profit'] - record['entry_price']) / 
-                                                     (record['entry_price'] - record['stop_loss']))
+                # Database format (direct fields)
+                if 'trade_id' in trade:
+                    record = {
+                        'signal_type': 1 if trade.get('signal_type') == 'BUY' else -1,
+                        'entry_price': trade.get('entry_price', 0),
+                        'exit_price': trade.get('exit_price', 0),
+                        'pnl': trade.get('pnl', 0),
+                        'pnl_percent': trade.get('pnl_percent', 0),
+                        'rsi': trade.get('rsi'),
+                        'macd': trade.get('macd'),
+                        'macd_signal': trade.get('macd_signal'),
+                        'macd_histogram': trade.get('macd_histogram'),
+                        'ema_9': trade.get('ema_9'),
+                        'ema_21': trade.get('ema_21'),
+                        'ema_50': trade.get('ema_50'),
+                        'adx': trade.get('adx'),
+                        'atr': trade.get('atr'),
+                        'volume': trade.get('volume'),
+                        'volatility': trade.get('volatility'),
+                        'liquidity_score': trade.get('liquidity_score'),
+                        'confidence_score': trade.get('confidence_score'),
+                        'success': 1 if trade.get('pnl', 0) > 0 else 0
+                    }
                 else:
-                    record['risk_reward_ratio'] = 0
+                    # JSONL format (nested structure)
+                    signal = trade.get('signal', {})
+                    market = trade.get('market_data', {})
+                    account = trade.get('account_state', {})
+                    result = trade.get('result', {})
+                    
+                    record = {
+                        'timestamp': trade.get('timestamp'),
+                        'signal_type': 1 if signal.get('signal_type') == 'long' else -1,
+                        'entry_price': signal.get('entry_price', 0),
+                        'size': signal.get('size', 0),
+                        'leverage': signal.get('leverage', 1),
+                        'stop_loss': signal.get('stop_loss', 0),
+                        'take_profit': signal.get('take_profit', 0),
+                        'momentum_pct': signal.get('momentum_pct', 0),
+                        'market_price': market.get('price', 0),
+                        'account_equity': account.get('equity', 0),
+                        'session_pnl': account.get('session_pnl', 0),
+                        'success': 1 if result.get('success') else 0
+                    }
+                    
+                    # Calculate risk/reward ratio
+                    if record['entry_price'] > 0 and record.get('stop_loss', 0) > 0:
+                        record['risk_reward_ratio'] = abs(
+                            (record['take_profit'] - record['entry_price']) / 
+                            (record['entry_price'] - record['stop_loss'])
+                        )
+                    else:
+                        record['risk_reward_ratio'] = 0
                 
                 records.append(record)
                 
@@ -118,7 +217,8 @@ class DatasetBuilder:
         
         logger.info(f"✅ Dataset built: {len(df)} samples")
         logger.info(f"   Features: {len(df.columns)}")
-        logger.info(f"   Success rate: {df['success'].mean()*100:.1f}%")
+        if len(df) > 0:
+            logger.info(f"   Success rate: {df['success'].mean()*100:.1f}%")
         
         return df
     

@@ -75,6 +75,8 @@ class TelegramBot:
             self.application.add_handler(CommandHandler("stats", self._cmd_stats))
             self.application.add_handler(CommandHandler("logs", self._cmd_logs))
             self.application.add_handler(CommandHandler("train", self._cmd_train))
+            self.application.add_handler(CommandHandler("analytics", self._cmd_analytics))
+            self.application.add_handler(CommandHandler("dbstats", self._cmd_dbstats))
             self.application.add_handler(CommandHandler("help", self._cmd_help))
             self.application.add_handler(CallbackQueryHandler(self._handle_callback))
             
@@ -516,6 +518,13 @@ class TelegramBot:
             "/pnl - Daily and weekly PnL\n"
             "/stats - Performance statistics\n"
             "/logs - Recent live logs (last 50 lines)\n\n"
+            "*Analytics:*\n"
+            "/analytics - Full performance dashboard\n"
+            "/analytics daily - Last 30 days breakdown\n"
+            "/analytics symbols - Best trading pairs\n"
+            "/analytics hours - Optimal trading hours\n"
+            "/analytics ml - ML model accuracy\n"
+            "/dbstats - Database health and size\n\n"
             "*ML Training:*\n"
             "/train - Trigger ML model retraining\n\n"
             "*Control:*\n"
@@ -526,7 +535,8 @@ class TelegramBot:
             "• Real-time updates on signals\n"
             "• Emergency alerts for big moves\n"
             "• Risk warnings at -0.8% PnL\n"
-            "• TP notifications at +1.6% PnL\n\n"
+            "• TP notifications at +1.6% PnL\n"
+            "• PostgreSQL analytics (if DATABASE_URL set)\n\n"
             "🎯 Target: 70% win rate | 3:1 R:R"
         )
         
@@ -656,6 +666,90 @@ class TelegramBot:
         )
         
         await self.send_message(message)
+    
+    async def _cmd_analytics(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /analytics command - Database analytics dashboard"""
+        try:
+            # Check if database is available
+            if not self.bot.db:
+                await update.message.reply_text(
+                    "❌ Database not connected\n\n"
+                    "Add DATABASE_URL to .env and restart bot.\n"
+                    "See NEONDB_SETUP.md for instructions.",
+                    parse_mode='Markdown'
+                )
+                return
+            
+            # Get query type from command args
+            args = context.args
+            query_type = args[0] if args else "full"
+            
+            # Import analytics
+            from app.database.analytics import AnalyticsDashboard, format_analytics_message
+            
+            await update.message.reply_text("📊 Generating analytics report...", parse_mode='Markdown')
+            
+            # Generate report
+            dashboard = AnalyticsDashboard(self.bot.db)
+            report = await format_analytics_message(dashboard, query_type)
+            
+            # Send report (split if too long)
+            if len(report) > 4000:
+                chunks = [report[i:i+4000] for i in range(0, len(report), 4000)]
+                for chunk in chunks:
+                    await update.message.reply_text(chunk, parse_mode='Markdown')
+            else:
+                await update.message.reply_text(report, parse_mode='Markdown')
+            
+        except Exception as e:
+            logger.error(f"Analytics command error: {e}", exc_info=True)
+            await update.message.reply_text(
+                f"❌ Error generating analytics:\n{str(e)}",
+                parse_mode='Markdown'
+            )
+    
+    async def _cmd_dbstats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /dbstats command - Database health and statistics"""
+        try:
+            if not self.bot.db:
+                await update.message.reply_text(
+                    "❌ Database not connected",
+                    parse_mode='Markdown'
+                )
+                return
+            
+            # Get database statistics
+            stats = await self.bot.db.get_total_stats()
+            
+            # Count open trades
+            open_trades = await self.bot.db.get_open_trades()
+            
+            message = [
+                "📊 **DATABASE STATISTICS**",
+                "=" * 35,
+                "",
+                f"✅ Status: Connected",
+                f"📝 Total Trades: {stats.get('total_trades', 0)}",
+                f"📂 Open Positions: {len(open_trades)}",
+                f"✅ Wins: {stats.get('winning_trades', 0)}",
+                f"❌ Losses: {stats.get('losing_trades', 0)}",
+                f"📈 Win Rate: {stats.get('win_rate', 0)}%",
+                "",
+                f"💰 Total P&L: ${stats.get('total_pnl', 0):+.2f}",
+                f"🏆 Best Trade: ${stats.get('best_trade', 0):+.2f}",
+                f"📉 Worst Trade: ${stats.get('worst_trade', 0):+.2f}",
+                "",
+                "Use /analytics for detailed reports"
+            ]
+            
+            await update.message.reply_text("\n".join(message), parse_mode='Markdown')
+            
+        except Exception as e:
+            logger.error(f"DB stats command error: {e}", exc_info=True)
+            await update.message.reply_text(
+                f"❌ Error fetching DB stats:\n{str(e)}",
+                parse_mode='Markdown'
+            )
     
     async def notify_fill(self, fill_type: str, symbol: str, side: str, price: float, size: float):
         """Send notification for order fill"""
