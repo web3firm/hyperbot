@@ -85,6 +85,10 @@ class SwingTradingStrategy:
         self.signal_cooldown_seconds = 300  # 5 minutes between signals
         self.prev_rsi: Optional[Decimal] = None  # Track previous RSI for momentum detection
         
+        # RSI smoothing state (for proper exponential smoothing)
+        self.rsi_avg_gain: Optional[Decimal] = None
+        self.rsi_avg_loss: Optional[Decimal] = None
+        
         # Cache for indicators
         self._rsi_cache = None
         self._macd_cache = None
@@ -104,25 +108,38 @@ class SwingTradingStrategy:
         logger.info(f"   ATR: >{self.min_atr_pct}% (from 24h data) | Hours: {self.trading_hours_start:02d}-{self.trading_hours_end:02d} UTC (peak activity)")
     
     def _calculate_rsi(self, prices: List[Decimal], period: int = 14) -> Optional[Decimal]:
-        """Calculate RSI indicator"""
+        """
+        Calculate RSI indicator with PROPER exponential smoothing
+        Uses Wilder's smoothing method (standard for RSI)
+        """
         if len(prices) < period + 1:
             return None
         
-        # Calculate price changes
-        changes = [prices[i] - prices[i-1] for i in range(1, len(prices))]
+        # Calculate current price change
+        current_change = prices[-1] - prices[-2]
+        current_gain = max(current_change, Decimal('0'))
+        current_loss = abs(min(current_change, Decimal('0')))
         
-        # Separate gains and losses
-        gains = [max(c, Decimal('0')) for c in changes]
-        losses = [abs(min(c, Decimal('0'))) for c in changes]
+        # First calculation (or reset if state lost)
+        if self.rsi_avg_gain is None or self.rsi_avg_loss is None:
+            # Calculate initial SMA for first RSI
+            changes = [prices[i] - prices[i-1] for i in range(-period, 0)]
+            gains = [max(c, Decimal('0')) for c in changes]
+            losses = [abs(min(c, Decimal('0'))) for c in changes]
+            
+            self.rsi_avg_gain = sum(gains) / period
+            self.rsi_avg_loss = sum(losses) / period
+        else:
+            # Subsequent calculations use exponential smoothing (Wilder's method)
+            # Formula: new_avg = (prev_avg × (period-1) + current_value) / period
+            self.rsi_avg_gain = (self.rsi_avg_gain * (period - 1) + current_gain) / period
+            self.rsi_avg_loss = (self.rsi_avg_loss * (period - 1) + current_loss) / period
         
-        # Calculate average gain/loss
-        avg_gain = sum(gains[-period:]) / period
-        avg_loss = sum(losses[-period:]) / period
-        
-        if avg_loss == 0:
+        # Calculate RSI
+        if self.rsi_avg_loss == 0:
             return Decimal('100')
         
-        rs = avg_gain / avg_loss
+        rs = self.rsi_avg_gain / self.rsi_avg_loss
         rsi = 100 - (100 / (1 + rs))
         
         return rsi
