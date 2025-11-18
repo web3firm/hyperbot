@@ -258,15 +258,14 @@ class HLOrderManager:
                 logger.error(f"❌ Stop Loss error: {e}")
                 oco_results['stop_loss'] = {'success': False, 'error': str(e)}
         
-        # Place take profit order (limit order works fine for TP)
+        # Place take profit order (limit order with TP flag)
         if tp_price:
             try:
-                tp_result = await self.client.place_order(
+                tp_result = await self.client.place_take_profit_order(
                     symbol,
                     close_side,
                     size,
-                    order_type='limit',
-                    price=tp_price,
+                    trigger_price=tp_price,
                     reduce_only=True
                 )
                 oco_results['take_profit'] = tp_result

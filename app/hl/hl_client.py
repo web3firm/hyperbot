@@ -413,6 +413,113 @@ class HyperLiquidClient:
                 'error': str(e)
             }
     
+    async def place_take_profit_order(self, symbol: str, side: str, size: Decimal,
+                                      trigger_price: Decimal, reduce_only: bool = False) -> Dict[str, Any]:
+        """
+        Place take-profit order on HyperLiquid
+        This is a limit order marked as TP type
+        
+        Args:
+            symbol: Trading symbol
+            side: 'buy' or 'sell'
+            size: Order size
+            trigger_price: Price at which to take profit
+            reduce_only: Reduce only flag
+            
+        Returns:
+            Order result
+        """
+        try:
+            # Determine if it's a buy or sell
+            is_buy = side.lower() == 'buy'
+            
+            # Format size with proper sign
+            size_float = float(size)
+            if not is_buy:
+                size_float = -abs(size_float)
+            else:
+                size_float = abs(size_float)
+            
+            # Round size to 2 decimals
+            size_float = round(size_float, 2)
+            
+            # Round trigger price
+            trigger_float = float(trigger_price)
+            if trigger_float >= 100:
+                trigger_float = round(trigger_float, 2)
+            elif trigger_float >= 10:
+                trigger_float = round(trigger_float, 3)
+            else:
+                trigger_float = round(trigger_float, 4)
+            
+            # Place TP order (limit order with TP flag)
+            order_result = self.exchange.order(
+                symbol,
+                is_buy,
+                abs(size_float),
+                trigger_float,
+                {
+                    'limit': {'tif': 'Gtc'},
+                    'trigger': {
+                        'triggerPx': trigger_float,
+                        'isMarket': False,  # Execute as limit order
+                        'tpsl': 'tp'  # Mark as take-profit
+                    }
+                },
+                reduce_only=reduce_only
+            )
+            
+            # Check if order was successful
+            if order_result and 'status' in order_result:
+                if order_result['status'] == 'ok':
+                    # Check for errors in response
+                    response = order_result.get('response', {})
+                    if isinstance(response, dict):
+                        data = response.get('data', {})
+                        if isinstance(data, dict):
+                            statuses = data.get('statuses', [])
+                            if statuses and isinstance(statuses[0], dict):
+                                if 'error' in statuses[0]:
+                                    logger.error(f"TP order error: {statuses[0]['error']}")
+                                    return {
+                                        'success': False,
+                                        'error': statuses[0]['error'],
+                                        'raw': order_result
+                                    }
+                    
+                    logger.info(f"✅ Take-profit order placed: {side} {size_float} {symbol} @ {trigger_float}")
+                    return {
+                        'success': True,
+                        'order_id': str(response.get('data', {}).get('statuses', [{}])[0].get('resting', {}).get('oid', 'unknown')),
+                        'symbol': symbol,
+                        'side': side,
+                        'size': abs(size_float),
+                        'type': 'take-profit',
+                        'trigger_price': trigger_float,
+                        'raw': order_result
+                    }
+                else:
+                    logger.error(f"TP order failed: {order_result}")
+                    return {
+                        'success': False,
+                        'error': order_result.get('response', 'Unknown error'),
+                        'raw': order_result
+                    }
+            
+            logger.error(f"Invalid TP order result: {order_result}")
+            return {
+                'success': False,
+                'error': 'Invalid order result',
+                'raw': order_result
+            }
+                
+        except Exception as e:
+            logger.error(f"Error placing TP order: {e}", exc_info=True)
+            return {
+                'success': False,
+                'error': str(e)
+            }
+    
     async def cancel_order(self, symbol: str, order_id: str) -> bool:
         """Cancel an order"""
         try:
