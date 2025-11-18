@@ -429,6 +429,15 @@ class HyperAIBot:
                         await asyncio.sleep(2)
                         continue
                     
+                    # **CRITICAL**: Skip signal generation if position already open (max 1 position)
+                    positions = account_state.get('positions', [])
+                    has_open_position = any(float(pos.get('size', 0)) != 0 for pos in positions)
+                    
+                    if has_open_position:
+                        # Don't generate new signals while position is active
+                        await asyncio.sleep(1)
+                        continue
+                    
                     # Generate signal from strategy
                     signal = await self.strategy.generate_signal(market_data, account_state)
                     
