@@ -66,7 +66,7 @@ class SwingTradingStrategy:
         # Entry thresholds - ENTERPRISE LEVEL (70% target)
         self.rsi_oversold = 30  # More extreme oversold (was 35)
         self.rsi_overbought = 70  # More extreme overbought (was 65)
-        self.min_volume_ratio = 1.5  # 50% above average (was 1.3)
+        self.min_volume_ratio = Decimal('1.2')  # Institutional standard (was 1.5 - too restrictive)
         self.min_adx = 25  # Strong trend required (>25 = trending market)
         self.min_signal_score = 5  # Require 5/8 points (was 4/7)
         
@@ -75,6 +75,7 @@ class SwingTradingStrategy:
         self.recent_volumes = deque(maxlen=50)
         self.last_signal_time: Optional[datetime] = None
         self.signal_cooldown_seconds = 300  # 5 minutes between signals
+        self.prev_rsi: Optional[Decimal] = None  # Track previous RSI for momentum detection
         
         # Cache for indicators
         self._rsi_cache = None
@@ -324,9 +325,15 @@ class SwingTradingStrategy:
                 score += 2  # Price below lower BB (mean reversion opportunity)
                 reasons.append(f"Below BB lower by {((bb['lower'] - current_price) / current_price * 100):.2f}%")
             
-            if macd['histogram'] > 0:
-                score += 1  # MACD bullish momentum
-                reasons.append(f"MACD bullish (hist: {macd['histogram']:.4f})")
+            # MACD line crossing signal line = early momentum shift (better than histogram)
+            if macd['macd'] > macd['signal']:
+                score += 1  # MACD bullish momentum (cross up)
+                reasons.append(f"MACD cross up ({macd['macd']:.4f} > {macd['signal']:.4f})")
+            
+            # Bonus point if RSI showing momentum reversal (crossing up from deep oversold)
+            if self.prev_rsi and self.prev_rsi < 28 and rsi > 28:
+                score += 1  # RSI momentum turning
+                reasons.append(f"RSI momentum up (prev: {self.prev_rsi:.1f} → {rsi:.1f})")
             
             if volume_ratio > self.min_volume_ratio:
                 score += 1  # High volume confirmation
@@ -348,9 +355,15 @@ class SwingTradingStrategy:
                 score += 2  # Price above upper BB
                 reasons.append(f"Above BB upper by {((current_price - bb['upper']) / current_price * 100):.2f}%")
             
-            if macd['histogram'] < 0:
-                score += 1  # MACD bearish momentum
-                reasons.append(f"MACD bearish (hist: {macd['histogram']:.4f})")
+            # MACD line crossing below signal line = early momentum shift
+            if macd['macd'] < macd['signal']:
+                score += 1  # MACD bearish momentum (cross down)
+                reasons.append(f"MACD cross down ({macd['macd']:.4f} < {macd['signal']:.4f})")
+            
+            # Bonus point if RSI showing momentum reversal (crossing down from deep overbought)
+            if self.prev_rsi and self.prev_rsi > 72 and rsi < 72:
+                score += 1  # RSI momentum turning
+                reasons.append(f"RSI momentum down (prev: {self.prev_rsi:.1f} → {rsi:.1f})")
             
             if volume_ratio > self.min_volume_ratio:
                 score += 1  # High volume confirmation
@@ -458,7 +471,55 @@ class SwingTradingStrategy:
             'reason': f"{', '.join(reasons)} (Score: {score}/8 - ENTERPRISE)"
         }
         
+        # Store RSI for next iteration's momentum detection
+        self.prev_rsi = rsi
+        
         return signal
+    
+    def revalidate_signal(self, signal: Dict[str, Any], current_price: Decimal) -> bool:
+        """
+        Revalidate signal before trade execution
+        
+        Checks:
+        1. Price hasn't moved more than 0.5% from signal generation
+        2. RSI still in extreme zone (if we have recent data)
+        
+        Args:
+            signal: Original signal generated
+            current_price: Current market price
+            
+        Returns:
+            True if signal still valid, False otherwise
+        """
+        original_entry = Decimal(str(signal.get('entry_price', 0)))
+        if original_entry <= 0:
+            return False
+        
+        # Check price movement since signal generation
+        price_change_pct = abs((current_price - original_entry) / original_entry * 100)
+        
+        # Max acceptable price move: 0.5% (2.5% PnL with 5x)
+        if price_change_pct > Decimal('0.5'):
+            logger.warning(f"⚠️ Signal invalidated: Price moved {price_change_pct:.2f}% (max 0.5%)")
+            return False
+        
+        # If we have RSI in signal, verify it's still in extreme zone
+        signal_rsi = signal.get('rsi')
+        if signal_rsi:
+            signal_type = signal.get('signal_type')
+            
+            # For LONG: RSI should still be < 35 (oversold)
+            if signal_type == 'long' and signal_rsi >= 35:
+                logger.warning(f"⚠️ Signal invalidated: RSI no longer oversold ({signal_rsi:.1f})")
+                return False
+            
+            # For SHORT: RSI should still be > 65 (overbought)
+            if signal_type == 'short' and signal_rsi <= 65:
+                logger.warning(f"⚠️ Signal invalidated: RSI no longer overbought ({signal_rsi:.1f})")
+                return False
+        
+        logger.info(f"✅ Signal revalidated: Price change {price_change_pct:.2f}% (within 0.5% limit)")
+        return True
     
     def record_trade_execution(self, signal: Dict[str, Any], result: Dict[str, Any]):
         """Record trade execution"""
