@@ -229,6 +229,29 @@ class StrategyManager:
         if strategy_key and strategy_key in self.strategies:
             self.strategies[strategy_key].record_trade_execution(signal, result)
     
+    def revalidate_signal(self, signal: Dict[str, Any], current_price) -> bool:
+        """
+        Revalidate signal before execution
+        
+        Args:
+            signal: Original signal
+            current_price: Current market price
+            
+        Returns:
+            True if signal still valid
+        """
+        strategy_name = signal.get('strategy')
+        strategy_key = self._get_strategy_key(strategy_name)
+        
+        if strategy_key and strategy_key in self.strategies:
+            strategy = self.strategies[strategy_key]
+            # Check if strategy has revalidation method
+            if hasattr(strategy, 'revalidate_signal'):
+                return strategy.revalidate_signal(signal, current_price)
+        
+        # Default: accept signal if no revalidation available
+        return True
+    
     def _get_strategy_key(self, strategy_class_name: str) -> Optional[str]:
         """
         Map strategy class name to internal key

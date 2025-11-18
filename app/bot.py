@@ -458,6 +458,16 @@ class HyperAIBot:
                         )
                         
                         if is_valid:
+                            # **REVALIDATE SIGNAL** - Check if still valid before execution
+                            current_price = Decimal(str(market_data.get('price', signal['entry_price'])))
+                            
+                            # Check if strategy has revalidation method
+                            if hasattr(self.strategy, 'revalidate_signal'):
+                                if not self.strategy.revalidate_signal(signal, current_price):
+                                    logger.warning(f"🚫 Signal invalidated before execution - market conditions changed")
+                                    await asyncio.sleep(1)
+                                    continue
+                            
                             # Execute trade
                             logger.info(f"🎯 Executing {signal['signal_type']} signal")
                             
