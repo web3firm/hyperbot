@@ -302,7 +302,7 @@ class HyperAIBot:
                     should_close = False
                     close_reason = ""
                     
-                    # **TRAILING STOP-LOSS LOGIC** - Lock in profits!
+                    # **TRAILING STOP-LOSS + TAKE-PROFIT LOGIC** - Lock in profits dynamically!
                     # If P&L reaches 3%+, move SL to breakeven or better
                     if unrealized_pnl_pct >= 3.0:  # Reached 50% of 6% target
                         # Calculate breakeven + buffer
@@ -320,6 +320,35 @@ class HyperAIBot:
                             if sl_price and trailing_sl < sl_price:
                                 logger.info(f"🔒 TRAILING SL: Locking profit at {unrealized_pnl_pct:.1f}% - Moving SL from ${sl_price:.3f} to ${trailing_sl:.3f}")
                                 targets['sl_price'] = trailing_sl
+                    
+                    # **TRAILING TAKE-PROFIT** - Move TP closer as profit increases
+                    if unrealized_pnl_pct >= 4.0 and tp_price:  # At 4% (66% of 6% target)
+                        if is_long:
+                            # Move TP down to lock in 5% instead of 6% (closer target)
+                            trailing_tp = entry_price * Decimal('1.025')  # +2.5% from entry = 5% profit with 5x leverage
+                            if trailing_tp < tp_price:  # Only move TP closer, never further
+                                logger.info(f"🎯 TRAILING TP: Tightening profit target at {unrealized_pnl_pct:.1f}% - Moving TP from ${tp_price:.3f} to ${trailing_tp:.3f}")
+                                targets['tp_price'] = trailing_tp
+                        else:
+                            # Short position - move TP up
+                            trailing_tp = entry_price * Decimal('0.975')  # -2.5% from entry
+                            if trailing_tp > tp_price:  # Only move TP closer
+                                logger.info(f"🎯 TRAILING TP: Tightening profit target at {unrealized_pnl_pct:.1f}% - Moving TP from ${tp_price:.3f} to ${trailing_tp:.3f}")
+                                targets['tp_price'] = trailing_tp
+                    
+                    # Additional trailing at 5%+ - move TP even closer
+                    if unrealized_pnl_pct >= 5.0 and tp_price:  # At 5% (83% of 6% target)
+                        if is_long:
+                            # Move TP to just above current price (lock in almost all profit)
+                            trailing_tp = current_price * Decimal('1.002')  # Just +0.2% above current
+                            if trailing_tp < tp_price:
+                                logger.info(f"🔥 AGGRESSIVE TRAILING TP: Locking {unrealized_pnl_pct:.1f}% - Moving TP to ${trailing_tp:.3f} (near current price)")
+                                targets['tp_price'] = trailing_tp
+                        else:
+                            trailing_tp = current_price * Decimal('0.998')  # Just -0.2% below current
+                            if trailing_tp > tp_price:
+                                logger.info(f"🔥 AGGRESSIVE TRAILING TP: Locking {unrealized_pnl_pct:.1f}% - Moving TP to ${trailing_tp:.3f} (near current price)")
+                                targets['tp_price'] = trailing_tp
                     
                     # Check if SL breached
                     if sl_price:
