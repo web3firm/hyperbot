@@ -62,10 +62,15 @@ class SwingTradingStrategy:
         self.bb_period = 20
         self.bb_std = 2
         self.adx_period = 14  # Trend strength indicator
+        self.atr_period = 14  # For dynamic stop-loss
         
         # Entry thresholds - ENTERPRISE LEVEL (70% target)
         self.rsi_oversold = 30  # More extreme oversold (was 35)
         self.rsi_overbought = 70  # More extreme overbought (was 65)
+        self.rsi_pullback_low = 35  # Healthy pullback zone (35-45)
+        self.rsi_pullback_high = 45  # For early entries in strong trends
+        self.rsi_pullback_short_low = 55  # For shorts (55-65)
+        self.rsi_pullback_short_high = 65
         self.min_volume_ratio = Decimal('1.2')  # Institutional standard (was 1.5 - too restrictive)
         self.min_adx = 25  # Strong trend required (>25 = trending market)
         self.min_signal_score = 5  # Require 5/8 points (was 4/7)
@@ -239,6 +244,36 @@ class SwingTradingStrategy:
         # ADX is smoothed DX (simplified - using current DX)
         return dx
     
+    def _calculate_atr(self, prices: List[Decimal], period: int = 14) -> Optional[Decimal]:
+        """
+        Calculate ATR (Average True Range) - Volatility Indicator
+        
+        Used for dynamic stop-loss positioning:
+        - High ATR = volatile market → wider stops
+        - Low ATR = calm market → tighter stops
+        
+        Returns:
+            ATR value or None if insufficient data
+        """
+        if len(prices) < period + 1:
+            return None
+        
+        # Calculate True Range for each period
+        tr_list = []
+        for i in range(1, len(prices)):
+            # Simplified TR = current high - current low
+            # For price-only data: TR = abs(current - previous)
+            tr = abs(prices[i] - prices[i-1])
+            tr_list.append(tr)
+        
+        if len(tr_list) < period:
+            return None
+        
+        # ATR is simple moving average of TR
+        atr = sum(tr_list[-period:]) / period
+        
+        return atr
+    
     async def generate_signal(self, market_data: Dict[str, Any],
                              account_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
@@ -303,6 +338,11 @@ class SwingTradingStrategy:
         if adx is None or adx < self.min_adx:
             return None  # Skip weak/choppy markets - only trade strong trends
         
+        # ATR - Volatility for dynamic stops
+        atr = self._calculate_atr(prices_list, self.atr_period)
+        if atr is None:
+            return None
+        
         # Volume confirmation
         avg_volume = sum(self.recent_volumes) / len(self.recent_volumes) if self.recent_volumes else Decimal('0')
         volume_ratio = current_volume / avg_volume if avg_volume > 0 else Decimal('0')
@@ -317,10 +357,18 @@ class SwingTradingStrategy:
         reasons = []
         
         # LONG SIGNAL CONDITIONS (More strict than before)
+        # Option 1: Extreme oversold (traditional)
         if trend == 'up' and rsi < self.rsi_oversold:
             score += 3  # RSI extreme oversold in uptrend
             reasons.append(f"RSI oversold ({rsi:.1f} < {self.rsi_oversold})")
-            
+        
+        # Option 2: Healthy pullback zone (earlier entry in strong trend)
+        elif trend == 'up' and self.rsi_pullback_low <= rsi <= self.rsi_pullback_high:
+            score += 2  # RSI pullback (35-45) - catches dip before oversold
+            reasons.append(f"RSI pullback zone ({rsi:.1f} in 35-45)")
+        
+        # Additional LONG scoring (applies to both options)
+        if trend == 'up' and (rsi < self.rsi_oversold or (self.rsi_pullback_low <= rsi <= self.rsi_pullback_high)):
             if current_price < bb['lower']:
                 score += 2  # Price below lower BB (mean reversion opportunity)
                 reasons.append(f"Below BB lower by {((bb['lower'] - current_price) / current_price * 100):.2f}%")
@@ -347,10 +395,18 @@ class SwingTradingStrategy:
                 signal_type = 'long'
         
         # SHORT SIGNAL CONDITIONS (More strict than before)
+        # Option 1: Extreme overbought (traditional)
         elif trend == 'down' and rsi > self.rsi_overbought:
             score += 3  # RSI extreme overbought in downtrend
             reasons.append(f"RSI overbought ({rsi:.1f} > {self.rsi_overbought})")
-            
+        
+        # Option 2: Healthy pullback zone (earlier entry in strong downtrend)
+        elif trend == 'down' and self.rsi_pullback_short_low <= rsi <= self.rsi_pullback_short_high:
+            score += 2  # RSI pullback (55-65) - catches rally before overbought
+            reasons.append(f"RSI pullback zone ({rsi:.1f} in 55-65)")
+        
+        # Additional SHORT scoring (applies to both options)
+        if trend == 'down' and (rsi > self.rsi_overbought or (self.rsi_pullback_short_low <= rsi <= self.rsi_pullback_short_high)):
             if current_price > bb['upper']:
                 score += 2  # Price above upper BB
                 reasons.append(f"Above BB upper by {((current_price - bb['upper']) / current_price * 100):.2f}%")
@@ -396,19 +452,24 @@ class SwingTradingStrategy:
         position_size = position_value / current_price
         position_size = round(float(position_size), 2)
         
-        # === CALCULATE SL/TP (leverage-adjusted) ===
-        sl_price_pct = self.sl_pct / self.leverage  # 1% PnL / 5x = 0.2% price
-        tp_price_pct = self.tp_pct / self.leverage  # 3% PnL / 5x = 0.6% price
+        # === CALCULATE SL/TP (ATR-based dynamic stops) ===
+        # Use ATR for stop-loss (adapts to volatility)
+        # 1.5x ATR = standard institutional stop distance
+        atr_multiplier = Decimal('1.5')
+        sl_distance = atr * atr_multiplier
+        
+        # TP remains at 3:1 ratio (3x the SL distance)
+        tp_distance = sl_distance * 3
         
         if signal_type == 'long':
             entry_price = current_price
-            sl_price = entry_price * (1 - sl_price_pct / 100)
-            tp_price = entry_price * (1 + tp_price_pct / 100)
+            sl_price = entry_price - sl_distance  # Stop below entry
+            tp_price = entry_price + tp_distance  # Target above entry
             side = 'buy'
         else:  # short
             entry_price = current_price
-            sl_price = entry_price * (1 + sl_price_pct / 100)
-            tp_price = entry_price * (1 - tp_price_pct / 100)
+            sl_price = entry_price + sl_distance  # Stop above entry
+            tp_price = entry_price - tp_distance  # Target below entry
             side = 'sell'
         
         # Round prices
