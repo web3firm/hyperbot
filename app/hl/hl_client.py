@@ -452,22 +452,25 @@ class HyperLiquidClient:
             else:
                 trigger_float = round(trigger_float, 4)
             
-            # Place TP order (limit order with TP flag)
+            # Place TP order (Take Market - executes at market price when trigger hit)
+            # For Take Market: pass trigger_float as limit_px, but isMarket=True executes at market
             order_result = self.exchange.order(
                 symbol,
                 is_buy,
                 abs(size_float),
-                trigger_float,
+                trigger_float,  # limit_px = trigger price (required by SDK)
                 {
-                    'limit': {'tif': 'Gtc'},
                     'trigger': {
                         'triggerPx': trigger_float,
-                        'isMarket': False,  # Execute as limit order
+                        'isMarket': True,  # ✅ Execute as MARKET order when triggered
                         'tpsl': 'tp'  # Mark as take-profit
                     }
                 },
                 reduce_only=reduce_only
             )
+            
+            # Log raw response for debugging
+            logger.debug(f"TP order raw response: {order_result}")
             
             # Check if order was successful
             if order_result and 'status' in order_result:
@@ -531,7 +534,7 @@ class HyperLiquidClient:
     
     async def set_leverage(self, symbol: str, leverage: int) -> bool:
         """
-        Set leverage for a symbol
+        Set leverage for a symbol in cross-margin mode
         
         Args:
             symbol: Trading symbol
@@ -541,18 +544,19 @@ class HyperLiquidClient:
             True if successful
         """
         try:
-            result = self.exchange.update_leverage(leverage, symbol)
+            # Use is_cross=True for cross-margin mode (default on HyperLiquid)
+            result = self.exchange.update_leverage(leverage, symbol, is_cross=True)
             success = result.get('status') == 'ok'
             
             if success:
-                logger.info(f"✅ Leverage set to {leverage}x for {symbol}")
+                logger.info(f"✅ Leverage set to {leverage}x for {symbol} (cross-margin)")
             else:
-                logger.error(f"Failed to set leverage: {result}")
+                logger.error(f"❌ Failed to set leverage: {result}")
             
             return success
             
         except Exception as e:
-            logger.error(f"Error setting leverage: {e}")
+            logger.error(f"❌ Error setting leverage: {e}")
             return False
     
     async def close_position(self, symbol: str) -> Dict[str, Any]:

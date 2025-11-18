@@ -452,24 +452,22 @@ class SwingTradingStrategy:
         position_size = position_value / current_price
         position_size = round(float(position_size), 2)
         
-        # === CALCULATE SL/TP (ATR-based dynamic stops) ===
-        # Use ATR for stop-loss (adapts to volatility)
-        # 1.5x ATR = standard institutional stop distance
-        atr_multiplier = Decimal('1.5')
-        sl_distance = atr * atr_multiplier
-        
-        # TP remains at 3:1 ratio (3x the SL distance)
-        tp_distance = sl_distance * 3
+        # === CALCULATE SL/TP (PnL-based with leverage adjustment) ===
+        # Convert PnL% targets to price% moves using leverage
+        # Formula: Price_Move% = PnL% / Leverage
+        # Example with 5x leverage: 15% PnL = 3% price move
+        sl_price_pct = self.sl_pct / self.leverage  # 5% / 5x = 1% price move
+        tp_price_pct = self.tp_pct / self.leverage  # 15% / 5x = 3% price move
         
         if signal_type == 'long':
             entry_price = current_price
-            sl_price = entry_price - sl_distance  # Stop below entry
-            tp_price = entry_price + tp_distance  # Target above entry
+            sl_price = entry_price * (1 - sl_price_pct / 100)  # Stop below entry
+            tp_price = entry_price * (1 + tp_price_pct / 100)  # Target above entry
             side = 'buy'
         else:  # short
             entry_price = current_price
-            sl_price = entry_price + sl_distance  # Stop above entry
-            tp_price = entry_price - tp_distance  # Target below entry
+            sl_price = entry_price * (1 + sl_price_pct / 100)  # Stop above entry (price goes UP = loss)
+            tp_price = entry_price * (1 - tp_price_pct / 100)  # Target below entry (price goes DOWN = profit)
             side = 'sell'
         
         # Round prices

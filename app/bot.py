@@ -148,9 +148,10 @@ class HyperAIBot:
             # Initialize order manager
             self.order_manager = HLOrderManager(self.client)
             
-            # Set leverage
-            leverage = int(os.getenv('LEVERAGE', '5'))
+            # Set leverage from MAX_LEVERAGE in .env
+            leverage = int(os.getenv('MAX_LEVERAGE', '5'))
             await self.order_manager.set_leverage(self.symbol, leverage)
+            logger.info(f"⚙️  Leverage set to {leverage}x for {self.symbol}")
             
             # Initialize strategy
             # Initialize strategy manager with all 4 strategies
