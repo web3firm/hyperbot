@@ -36,10 +36,17 @@ class SwingTradingStrategy:
         self.symbol = symbol
         self.config = config or {}
         
-        # Strategy parameters - SWING OPTIMIZED
+        # Strategy parameters - SWING OPTIMIZED (leverage-adjusted)
         self.leverage = int(os.getenv('MAX_LEVERAGE', '5'))
-        self.tp_pct = Decimal('6.0')  # 6% PnL target (30% price with 5x) - swing needs room
-        self.sl_pct = Decimal('2.0')  # 2% PnL stop (10% price with 5x) - avoid wick stops
+        
+        # PnL targets (what you gain/lose in portfolio %)
+        self.tp_pct = Decimal('15.0')  # 15% PnL target
+        self.sl_pct = Decimal('5.0')   # 5% PnL stop (3:1 ratio maintained)
+        
+        # This translates to PRICE moves:
+        # With 5x leverage: 15% PnL = 3% price move for TP
+        # With 5x leverage: 5% PnL = 1% price move for SL
+        
         self.position_size_pct = Decimal(os.getenv('POSITION_SIZE_PCT', '50.0'))
         
         # Risk management
