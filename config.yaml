@@ -1,0 +1,75 @@
+# HyperAI Trader Configuration
+# Advanced configuration for bot behavior
+
+bot:
+  mode: rule_based  # rule_based, hybrid, ai
+  symbol: SOL
+  exchange: hyperliquid
+
+strategy:
+  scalping_2pct:
+    enabled: true
+    leverage: 5
+    take_profit_pct: 2.0
+    stop_loss_pct: 1.0
+    position_size_pct: 70
+    min_momentum_threshold: 0.1
+    signal_cooldown_seconds: 30
+
+risk:
+  max_position_size_pct: 70
+  max_positions: 3
+  max_leverage: 5
+  max_daily_loss_pct: 5
+  max_drawdown_pct: 10
+  max_trades_per_hour: 10
+  max_trades_per_day: 120
+
+kill_switch:
+  daily_loss_trigger_pct: 10
+  drawdown_trigger_pct: 15
+  margin_call_trigger_pct: 90
+  position_loss_trigger_pct: 8
+  auto_reset_enabled: false
+
+drawdown:
+  warning_threshold_pct: 5
+  critical_threshold_pct: 10
+  emergency_threshold_pct: 15
+  auto_pause_enabled: true
+  auto_pause_threshold_pct: 12
+
+monitoring:
+  enable_telegram: false
+  telegram_bot_token: ""
+  telegram_chat_id: ""
+  enable_dashboard: false
+  dashboard_port: 8501
+
+data:
+  collect_trades: true
+  trade_log_path: data/trades
+  min_trades_for_training: 1000
+  auto_train_enabled: false
+
+ai:
+  model_type: transformer  # transformer, xgboost, rl
+  prediction_threshold: 0.6
+  ensemble_enabled: false
+  feature_engineering:
+    include_orderflow: true
+    include_volatility: true
+    include_momentum: true
+    include_trend: true
+
+backtesting:
+  enabled: false
+  start_date: "2024-01-01"
+  end_date: "2024-12-31"
+  initial_capital: 1000
+
+logging:
+  level: INFO
+  file_path: logs/bot.log
+  max_size_mb: 100
+  backup_count: 10
