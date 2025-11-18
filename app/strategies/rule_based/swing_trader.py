@@ -74,9 +74,9 @@ class SwingTradingStrategy:
         self.min_volume_ratio = Decimal('1.2')  # Institutional standard (was 1.5 - too restrictive)
         self.min_adx = 25  # Strong trend required (>25 = trending market)
         self.min_signal_score = 6  # Require 6/8 points (75% threshold for higher quality)
-        self.min_atr_pct = Decimal('0.5')  # Minimum ATR % (volatility filter to avoid choppy markets)
-        self.trading_hours_start = 8  # UTC 8am
-        self.trading_hours_end = 16   # UTC 4pm (high liquidity period)
+        self.min_atr_pct = Decimal('0.2')  # Minimum ATR % (0.2% based on 24h data analysis)
+        self.trading_hours_start = 2  # UTC 2am (real market activity starts here)
+        self.trading_hours_end = 15   # UTC 3pm (covers all peak hours: 2-3am, 6am, 10am, 2pm)
         
         # State tracking
         self.recent_prices = deque(maxlen=100)  # Need 100 for indicators
@@ -94,14 +94,14 @@ class SwingTradingStrategy:
         self.signals_generated = 0
         self.trades_executed = 0
         
-        logger.info(f"📈 ULTRA-QUALITY Swing Trading Strategy initialized for {symbol}")
+        logger.info(f"📈 DATA-DRIVEN Swing Strategy initialized for {symbol}")
         logger.info(f"   🎯 TARGET: 75% Win Rate | 3:1 R:R")
         logger.info(f"   Leverage: {self.leverage}x")
         logger.info(f"   TP: +{self.tp_pct}% PnL | SL: -{self.sl_pct}% PnL")
         logger.info(f"   R:R Ratio: 1:{float(self.tp_pct/self.sl_pct)}")
         logger.info(f"   RSI: {self.rsi_oversold}/{self.rsi_overbought} | EMA: {self.ema_fast}/{self.ema_slow}")
         logger.info(f"   ADX: >{self.min_adx} (trend) | Score: {self.min_signal_score}/8 (75%)")
-        logger.info(f"   ATR: >{self.min_atr_pct}% (volatility) | Hours: {self.trading_hours_start}-{self.trading_hours_end} UTC")
+        logger.info(f"   ATR: >{self.min_atr_pct}% (from 24h data) | Hours: {self.trading_hours_start:02d}-{self.trading_hours_end:02d} UTC (peak activity)")
     
     def _calculate_rsi(self, prices: List[Decimal], period: int = 14) -> Optional[Decimal]:
         """Calculate RSI indicator"""
