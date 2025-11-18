@@ -30,14 +30,14 @@ CREATE TABLE IF NOT EXISTS trades (
     
     -- Metadata
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    closed_at TIMESTAMPTZ,
-    
-    -- Indexes for fast queries
-    INDEX idx_trades_timestamp (timestamp DESC),
-    INDEX idx_trades_symbol (symbol),
-    INDEX idx_trades_status (status),
-    INDEX idx_trades_pnl (pnl DESC)
+    closed_at TIMESTAMPTZ
 );
+
+-- Indexes for trades table
+CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades (timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades (symbol);
+CREATE INDEX IF NOT EXISTS idx_trades_status ON trades (status);
+CREATE INDEX IF NOT EXISTS idx_trades_pnl ON trades (pnl DESC);
 
 -- Signals table - All trading signals (executed or not)
 CREATE TABLE IF NOT EXISTS signals (
@@ -70,14 +70,14 @@ CREATE TABLE IF NOT EXISTS signals (
     rejection_reason VARCHAR(200),
     
     -- Metadata
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    
-    -- Indexes
-    INDEX idx_signals_timestamp (timestamp DESC),
-    INDEX idx_signals_symbol (symbol),
-    INDEX idx_signals_executed (executed),
-    INDEX idx_signals_confidence (confidence_score DESC)
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Indexes for signals table
+CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals (timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals (symbol);
+CREATE INDEX IF NOT EXISTS idx_signals_executed ON signals (executed);
+CREATE INDEX IF NOT EXISTS idx_signals_confidence ON signals (confidence_score DESC);
 
 -- ML Predictions table - Model predictions for analysis
 CREATE TABLE IF NOT EXISTS ml_predictions (
@@ -103,13 +103,13 @@ CREATE TABLE IF NOT EXISTS ml_predictions (
     was_correct BOOLEAN,
     
     -- Metadata
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    
-    -- Indexes
-    INDEX idx_ml_predictions_timestamp (timestamp DESC),
-    INDEX idx_ml_predictions_model (model_name),
-    INDEX idx_ml_predictions_confidence (confidence DESC)
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Indexes for ml_predictions table
+CREATE INDEX IF NOT EXISTS idx_ml_predictions_timestamp ON ml_predictions (timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_ml_predictions_model ON ml_predictions (model_name);
+CREATE INDEX IF NOT EXISTS idx_ml_predictions_confidence ON ml_predictions (confidence DESC);
 
 -- Account Snapshots table - Regular account state snapshots
 CREATE TABLE IF NOT EXISTS account_snapshots (
@@ -138,11 +138,11 @@ CREATE TABLE IF NOT EXISTS account_snapshots (
     sharpe_ratio DECIMAL(10, 4),
     
     -- Metadata
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    
-    -- Indexes
-    INDEX idx_account_snapshots_timestamp (timestamp DESC)
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Indexes for account_snapshots table
+CREATE INDEX IF NOT EXISTS idx_account_snapshots_timestamp ON account_snapshots (timestamp DESC);
 
 -- Performance Metrics table - Aggregated daily/hourly stats
 CREATE TABLE IF NOT EXISTS performance_metrics (
@@ -178,12 +178,12 @@ CREATE TABLE IF NOT EXISTS performance_metrics (
     -- Metadata
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     
-    -- Indexes
-    INDEX idx_performance_metrics_period (period_start DESC, period_type),
-    
     -- Unique constraint - one record per period
     UNIQUE(period_start, period_type)
 );
+
+-- Indexes for performance_metrics table
+CREATE INDEX IF NOT EXISTS idx_performance_metrics_period ON performance_metrics (period_start DESC, period_type);
 
 -- Market Data table - For backtesting and analysis
 CREATE TABLE IF NOT EXISTS market_data (
@@ -205,12 +205,12 @@ CREATE TABLE IF NOT EXISTS market_data (
     -- Metadata
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     
-    -- Indexes
-    INDEX idx_market_data_timestamp_symbol (timestamp DESC, symbol),
-    
     -- Unique constraint - one record per timestamp/symbol
     UNIQUE(timestamp, symbol)
 );
+
+-- Indexes for market_data table
+CREATE INDEX IF NOT EXISTS idx_market_data_timestamp_symbol ON market_data (timestamp DESC, symbol);
 
 -- System Events table - Bot events, errors, restarts
 CREATE TABLE IF NOT EXISTS system_events (
@@ -226,13 +226,13 @@ CREATE TABLE IF NOT EXISTS system_events (
     consecutive_errors INTEGER DEFAULT 0,
     
     -- Metadata
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    
-    -- Indexes
-    INDEX idx_system_events_timestamp (timestamp DESC),
-    INDEX idx_system_events_severity (severity),
-    INDEX idx_system_events_type (event_type)
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Indexes for system_events table
+CREATE INDEX IF NOT EXISTS idx_system_events_timestamp ON system_events (timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_system_events_severity ON system_events (severity);
+CREATE INDEX IF NOT EXISTS idx_system_events_type ON system_events (event_type);
 
 -- Create useful views for analytics
 
@@ -274,16 +274,16 @@ ORDER BY total_pnl DESC;
 -- Hourly Trading Activity View
 CREATE OR REPLACE VIEW hourly_activity AS
 SELECT 
-    EXTRACT(HOUR FROM timestamp) as hour_utc,
+    EXTRACT(HOUR FROM t.timestamp) as hour_utc,
     COUNT(*) as total_trades,
-    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as winning_trades,
-    ROUND(SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END)::NUMERIC / NULLIF(COUNT(*), 0) * 100, 2) as win_rate,
-    ROUND(SUM(pnl)::NUMERIC, 4) as total_pnl,
-    ROUND(AVG(volatility)::NUMERIC, 6) as avg_volatility
+    SUM(CASE WHEN t.pnl > 0 THEN 1 ELSE 0 END) as winning_trades,
+    ROUND(SUM(CASE WHEN t.pnl > 0 THEN 1 ELSE 0 END)::NUMERIC / NULLIF(COUNT(*), 0) * 100, 2) as win_rate,
+    ROUND(SUM(t.pnl)::NUMERIC, 4) as total_pnl,
+    ROUND(AVG(s.volatility)::NUMERIC, 6) as avg_volatility
 FROM trades t
 LEFT JOIN signals s ON t.id = s.trade_id
 WHERE t.status = 'CLOSED' AND t.closed_at IS NOT NULL
-GROUP BY EXTRACT(HOUR FROM timestamp)
+GROUP BY EXTRACT(HOUR FROM t.timestamp)
 ORDER BY hour_utc;
 
 -- ML Model Performance View
