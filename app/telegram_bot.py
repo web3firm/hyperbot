@@ -471,15 +471,18 @@ class TelegramBot:
                     if len(msg) > 100:
                         msg = msg[:97] + "..."
                     
-                    formatted_logs.append(f"{emoji} `{time}` {msg}")
+                    # Escape HTML special characters
+                    msg = msg.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                    
+                    formatted_logs.append(f"{emoji} <code>{time}</code> {msg}")
             
             # Split into chunks if too long (Telegram has 4096 char limit)
             log_text = "\n".join(formatted_logs[-30:])  # Last 30 formatted lines
             
             message = (
-                f"📝 *LIVE LOGS* (Last 30 entries)\n\n"
+                f"📝 <b>LIVE LOGS</b> (Last 30 entries)\n\n"
                 f"{log_text}\n\n"
-                f"_Full logs: logs/bot_{log_date}.log_"
+                f"<i>Full logs: logs/bot_{log_date}.log</i>"
             )
             
             # Handle message length
@@ -487,10 +490,10 @@ class TelegramBot:
                 # Split into multiple messages
                 chunks = [formatted_logs[i:i+15] for i in range(0, len(formatted_logs[-30:]), 15)]
                 for i, chunk in enumerate(chunks):
-                    chunk_msg = f"📝 *LIVE LOGS* (Part {i+1}/{len(chunks)})\n\n" + "\n".join(chunk)
-                    await update.message.reply_text(chunk_msg, parse_mode='Markdown')
+                    chunk_msg = f"📝 <b>LIVE LOGS</b> (Part {i+1}/{len(chunks)})\n\n" + "\n".join(chunk)
+                    await update.message.reply_text(chunk_msg, parse_mode='HTML')
             else:
-                await update.message.reply_text(message, parse_mode='Markdown')
+                await update.message.reply_text(message, parse_mode='HTML')
             
         except Exception as e:
             logger.error(f"Error in /logs command: {e}", exc_info=True)
@@ -540,28 +543,28 @@ class TelegramBot:
         """Handle /help command"""
         try:
             message = (
-                "❓ *HELP - AVAILABLE COMMANDS*\n\n"
-                "*Monitoring:*\n"
+                "❓ <b>HELP - AVAILABLE COMMANDS</b>\n\n"
+                "<b>Monitoring:</b>\n"
                 "/status - Bot and account status\n"
                 "/positions - Active open positions\n"
                 "/trades - Last 10 completed trades\n"
                 "/pnl - Daily and weekly PnL\n"
                 "/stats - Performance statistics\n"
                 "/logs - Recent live logs (last 50 lines)\n\n"
-                "*Analytics:*\n"
+                "<b>Analytics:</b>\n"
                 "/analytics - Full performance dashboard\n"
                 "/analytics daily - Last 30 days breakdown\n"
                 "/analytics symbols - Best trading pairs\n"
                 "/analytics hours - Optimal trading hours\n"
                 "/analytics ml - ML model accuracy\n"
                 "/dbstats - Database health and size\n\n"
-                "*ML Training:*\n"
+                "<b>ML Training:</b>\n"
                 "/train - Trigger ML model retraining\n\n"
-                "*Control:*\n"
+                "<b>Control:</b>\n"
                 "Use the inline buttons for:\n"
                 "🚀 START - Resume trading\n"
                 "🛑 STOP - Pause trading\n\n"
-                "*Notes:*\n"
+                "<b>Notes:</b>\n"
                 "• Real-time updates on signals\n"
                 "• Emergency alerts for big moves\n"
                 "• Risk warnings at -0.8% PnL\n"
@@ -570,7 +573,7 @@ class TelegramBot:
                 "🎯 Target: 70% win rate | 3:1 R:R"
             )
             
-            await update.message.reply_text(message, parse_mode='Markdown')
+            await update.message.reply_text(message, parse_mode='HTML')
             
         except Exception as e:
             logger.error(f"Error in /help command: {e}", exc_info=True)
