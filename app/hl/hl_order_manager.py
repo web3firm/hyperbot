@@ -532,7 +532,8 @@ class HLOrderManager:
         """
         return await self.client.set_leverage(symbol, leverage)
     
-    def calculate_position_size(self, account_value: Decimal, 
+    def calculate_position_size(self, symbol: str,
+                                account_value: Decimal, 
                                 risk_pct: Decimal,
                                 entry_price: Decimal,
                                 sl_price: Decimal,
@@ -541,6 +542,7 @@ class HLOrderManager:
         Calculate position size based on risk parameters
         
         Args:
+            symbol: Trading symbol
             account_value: Account equity
             risk_pct: Risk percentage (e.g., 1.0 for 1%)
             entry_price: Entry price
