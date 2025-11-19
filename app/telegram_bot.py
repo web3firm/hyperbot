@@ -221,7 +221,9 @@ class TelegramBot:
     async def _cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /positions command"""
         try:
-            positions = self.bot.client.get_open_positions()
+            # Get account state which includes positions
+            account = await self.bot.client.get_account_state()
+            positions = account.get('positions', [])
             
             if not positions:
                 message = "📭 *NO OPEN POSITIONS*\n\nAll positions are closed."
@@ -231,20 +233,29 @@ class TelegramBot:
                 for pos in positions:
                     side_emoji = "🟢" if pos['side'] == 'long' else "🔴"
                     pnl_emoji = "✅" if pos['unrealized_pnl'] >= 0 else "❌"
-                    pnl_pct = (pos['unrealized_pnl'] / pos['position_value']) * 100
+                    
+                    # Calculate PnL percentage
+                    pnl_pct = 0
+                    if pos['position_value'] > 0:
+                        pnl_pct = (pos['unrealized_pnl'] / pos['position_value']) * 100
+                    
+                    # Get current price from market
+                    current_price = await self.bot.client.get_market_price(pos['symbol'])
+                    current_str = f"${float(current_price):.3f}" if current_price else "N/A"
                     
                     message += (
-                        f"{side_emoji} *{pos['side'].upper()} {pos['size']} {pos['symbol']}*\n"
+                        f"{side_emoji} *{pos['side'].upper()} {abs(pos['size']):.4f} {pos['symbol']}*\n"
                         f"💵 Entry: ${pos['entry_price']:.3f}\n"
-                        f"📍 Current: ${pos['mark_price']:.3f}\n"
+                        f"📍 Current: {current_str}\n"
                         f"{pnl_emoji} PnL: ${pos['unrealized_pnl']:.2f} ({pnl_pct:+.2f}%)\n"
                         f"💰 Value: ${pos['position_value']:.2f}\n"
-                        f"⚡ Leverage: {pos.get('leverage', 'N/A')}x\n\n"
+                        f"⚡ Leverage: {pos.get('leverage', 1)}x\n\n"
                     )
             
             await update.message.reply_text(message, parse_mode='Markdown')
             
         except Exception as e:
+            logger.error(f"Error in /positions command: {e}", exc_info=True)
             await update.message.reply_text(f"Error fetching positions: {e}")
     
     async def _cmd_trades(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -411,8 +422,26 @@ class TelegramBot:
             log_file = f"/workspaces/hyperbot/logs/bot_{log_date}.log"
             
             if not os.path.exists(log_file):
-                await update.message.reply_text(f"📭 No log file found for today ({log_date})")
-                return
+                # Try alternative locations
+                alt_locations = [
+                    f"/root/hyperbot/logs/bot_{log_date}.log",
+                    "./logs/bot.log",
+                    "./logs/bot_output.log"
+                ]
+                
+                for alt_file in alt_locations:
+                    if os.path.exists(alt_file):
+                        log_file = alt_file
+                        break
+                else:
+                    await update.message.reply_text(
+                        f"📭 No log file found for today ({log_date})\n\n"
+                        "This is normal if:\n"
+                        "• Bot is running on VPS (logs at /root/hyperbot/logs/)\n"
+                        "• Using PM2 (check with: pm2 logs hyperbot)\n"
+                        "• No activity today yet"
+                    )
+                    return
             
             # Read last 50 lines
             with open(log_file, 'r') as f:
@@ -509,38 +538,43 @@ class TelegramBot:
     
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /help command"""
-        message = (
-            "❓ *HELP - AVAILABLE COMMANDS*\n\n"
-            "*Monitoring:*\n"
-            "/status - Bot and account status\n"
-            "/positions - Active open positions\n"
-            "/trades - Last 10 completed trades\n"
-            "/pnl - Daily and weekly PnL\n"
-            "/stats - Performance statistics\n"
-            "/logs - Recent live logs (last 50 lines)\n\n"
-            "*Analytics:*\n"
-            "/analytics - Full performance dashboard\n"
-            "/analytics daily - Last 30 days breakdown\n"
-            "/analytics symbols - Best trading pairs\n"
-            "/analytics hours - Optimal trading hours\n"
-            "/analytics ml - ML model accuracy\n"
-            "/dbstats - Database health and size\n\n"
-            "*ML Training:*\n"
-            "/train - Trigger ML model retraining\n\n"
-            "*Control:*\n"
-            "Use the inline buttons for:\n"
-            "🚀 START - Resume trading\n"
-            "🛑 STOP - Pause trading\n\n"
-            "*Notes:*\n"
-            "• Real-time updates on signals\n"
-            "• Emergency alerts for big moves\n"
-            "• Risk warnings at -0.8% PnL\n"
-            "• TP notifications at +1.6% PnL\n"
-            "• PostgreSQL analytics (if DATABASE_URL set)\n\n"
-            "🎯 Target: 70% win rate | 3:1 R:R"
-        )
-        
-        await update.message.reply_text(message, parse_mode='Markdown')
+        try:
+            message = (
+                "❓ *HELP - AVAILABLE COMMANDS*\n\n"
+                "*Monitoring:*\n"
+                "/status - Bot and account status\n"
+                "/positions - Active open positions\n"
+                "/trades - Last 10 completed trades\n"
+                "/pnl - Daily and weekly PnL\n"
+                "/stats - Performance statistics\n"
+                "/logs - Recent live logs (last 50 lines)\n\n"
+                "*Analytics:*\n"
+                "/analytics - Full performance dashboard\n"
+                "/analytics daily - Last 30 days breakdown\n"
+                "/analytics symbols - Best trading pairs\n"
+                "/analytics hours - Optimal trading hours\n"
+                "/analytics ml - ML model accuracy\n"
+                "/dbstats - Database health and size\n\n"
+                "*ML Training:*\n"
+                "/train - Trigger ML model retraining\n\n"
+                "*Control:*\n"
+                "Use the inline buttons for:\n"
+                "🚀 START - Resume trading\n"
+                "🛑 STOP - Pause trading\n\n"
+                "*Notes:*\n"
+                "• Real-time updates on signals\n"
+                "• Emergency alerts for big moves\n"
+                "• Risk warnings at -0.8% PnL\n"
+                "• TP notifications at +1.6% PnL\n"
+                "• PostgreSQL analytics (if DATABASE_URL set)\n\n"
+                "🎯 Target: 70% win rate | 3:1 R:R"
+            )
+            
+            await update.message.reply_text(message, parse_mode='Markdown')
+            
+        except Exception as e:
+            logger.error(f"Error in /help command: {e}", exc_info=True)
+            await update.message.reply_text("Error displaying help. Please try again.")
     
     # ==================== CALLBACK HANDLERS ====================
     
