@@ -227,6 +227,22 @@ class HyperAIBot:
                     self.error_handler = ErrorHandler(self.telegram_bot)
                     logger.info("🛡️ Error handler initialized with Telegram notifications")
                     
+                    # Initialize database if DATABASE_URL is set
+                    database_url = os.getenv('DATABASE_URL')
+                    if database_url:
+                        try:
+                            logger.info("📊 Connecting to PostgreSQL database...")
+                            from app.database.db_manager import DatabaseManager
+                            self.db = DatabaseManager(database_url)
+                            await self.db.connect()
+                            logger.info("✅ Database connected and migrations applied")
+                        except Exception as db_error:
+                            logger.error(f"❌ Database connection failed: {db_error}")
+                            logger.warning("⚠️ Continuing without database (will use JSONL fallback)")
+                            self.db = None
+                    else:
+                        logger.info("📊 DATABASE_URL not set, using JSONL fallback")
+                    
                     # Start auto-trainer background task
                     logger.info("🤖 Starting ML auto-trainer...")
                     from ml.auto_trainer import AutoTrainer
