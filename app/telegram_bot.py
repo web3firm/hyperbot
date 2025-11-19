@@ -15,6 +15,45 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 logger = logging.getLogger(__name__)
 
 
+def mask_token(token: str) -> str:
+    """
+    Mask sensitive token for logging
+    Shows first 10 chars and last 4 chars, masks the middle
+    Example: 8374468872:AAGZEBeQ3Yjwb4v2xNQRuePIbnBrSVKaOGI -> 8374468872:AAG...aOGI
+    """
+    if not token or len(token) < 20:
+        return "***"
+    
+    # For Telegram tokens format: XXXXXXXXXX:XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+    if ':' in token:
+        parts = token.split(':')
+        bot_id = parts[0]
+        token_part = parts[1]
+        return f"{bot_id}:{token_part[:3]}...{token_part[-4:]}"
+    
+    # Generic masking
+    return f"{token[:10]}...{token[-4:]}"
+
+
+def mask_sensitive_data(text: str, token: str = None) -> str:
+    """
+    Mask sensitive data in text (for error messages, logs, etc.)
+    Replaces full token with masked version
+    """
+    if not text:
+        return text
+    
+    # Get token from environment if not provided
+    if not token:
+        token = os.getenv('TELEGRAM_BOT_TOKEN', '')
+    
+    if token and token in text:
+        masked = mask_token(token)
+        text = text.replace(token, masked)
+    
+    return text
+
+
 class TelegramBot:
     """
     Enterprise Telegram Bot for trading system monitoring and control
@@ -55,6 +94,7 @@ class TelegramBot:
         self.session_start = datetime.now(timezone.utc)
         
         logger.info("📱 Telegram Bot initialized")
+        logger.info(f"   Token: {mask_token(self.token)}")
         logger.info(f"   Chat ID: {self.chat_id}")
     
     async def start(self):
@@ -100,8 +140,9 @@ class TelegramBot:
             logger.info("✅ Telegram bot started successfully")
             
         except Exception as e:
-            logger.error(f"Failed to start Telegram bot: {e}")
-            raise
+            error_msg = mask_sensitive_data(str(e), self.token)
+            logger.error(f"Failed to start Telegram bot: {error_msg}")
+            raise Exception(f"Failed to start Telegram bot: {error_msg}") from None
     
     async def stop(self):
         """Stop the Telegram bot"""
