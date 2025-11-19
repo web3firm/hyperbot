@@ -20,12 +20,53 @@ from decimal import Decimal
 from typing import Dict, Any, Optional
 from types import FrameType
 import json
+import re
 
 # Add to path
 sys.path.append(str(Path(__file__).parent.parent))
 
 from dotenv import load_dotenv
 load_dotenv()
+
+
+class SensitiveDataFilter(logging.Filter):
+    """Filter to mask sensitive data in logs (tokens, API keys, URLs with tokens)"""
+    
+    def __init__(self):
+        super().__init__()
+        # Get sensitive tokens from environment
+        self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN', '')
+        self.api_secret = os.getenv('HYPERLIQUID_API_SECRET', '')
+        
+    def filter(self, record):
+        """Mask sensitive data in log records"""
+        if hasattr(record, 'msg'):
+            msg = str(record.msg)
+            
+            # Mask Telegram bot token in URLs
+            if self.telegram_token and self.telegram_token in msg:
+                # Mask the token
+                if ':' in self.telegram_token:
+                    bot_id = self.telegram_token.split(':')[0]
+                    msg = msg.replace(self.telegram_token, f"{bot_id}:***MASKED***")
+                else:
+                    msg = msg.replace(self.telegram_token, "***MASKED***")
+            
+            # Mask API URLs with tokens using regex (catch any bot token in URLs)
+            msg = re.sub(
+                r'(https?://[^/]+/bot)(\d+:[A-Za-z0-9_-]+)',
+                r'\1***MASKED***',
+                msg
+            )
+            
+            # Mask API secrets
+            if self.api_secret and len(self.api_secret) > 10:
+                msg = msg.replace(self.api_secret, '***MASKED***')
+            
+            record.msg = msg
+            
+        return True
+
 
 # Import HyperLiquid integration
 from app.hl.hl_client import HyperLiquidClient
@@ -52,7 +93,7 @@ from app.database.db_manager import DatabaseManager
 # Create logs directory if it doesn't exist
 Path('logs').mkdir(exist_ok=True)
 
-# Setup logging
+# Setup logging with sensitive data filter
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -61,7 +102,19 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
+
+# Add sensitive data filter to all handlers
+sensitive_filter = SensitiveDataFilter()
+for handler in logging.root.handlers:
+    handler.addFilter(sensitive_filter)
+
 logger = logging.getLogger(__name__)
+
+# Suppress noisy HTTP logs from telegram library
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('httpcore').setLevel(logging.WARNING)
+logging.getLogger('telegram').setLevel(logging.WARNING)
+logging.getLogger('telegram.ext').setLevel(logging.WARNING)
 
 # Global shutdown event
 shutdown_event = asyncio.Event()
