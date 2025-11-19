@@ -724,23 +724,39 @@ class TelegramBot:
             # Count open trades
             open_trades = await self.bot.db.get_open_trades()
             
-            message = [
-                "📊 **DATABASE STATISTICS**",
-                "=" * 35,
-                "",
-                f"✅ Status: Connected",
-                f"📝 Total Trades: {stats.get('total_trades', 0)}",
-                f"📂 Open Positions: {len(open_trades)}",
-                f"✅ Wins: {stats.get('winning_trades', 0)}",
-                f"❌ Losses: {stats.get('losing_trades', 0)}",
-                f"📈 Win Rate: {stats.get('win_rate', 0)}%",
-                "",
-                f"💰 Total P&L: ${stats.get('total_pnl', 0):+.2f}",
-                f"🏆 Best Trade: ${stats.get('best_trade', 0):+.2f}",
-                f"📉 Worst Trade: ${stats.get('worst_trade', 0):+.2f}",
-                "",
-                "Use /analytics for detailed reports"
-            ]
+            # Handle empty stats
+            if not stats or stats.get('total_trades') == 0:
+                message = [
+                    "📊 **DATABASE STATISTICS**",
+                    "=" * 35,
+                    "",
+                    "✅ Status: Connected",
+                    "📝 Total Trades: 0",
+                    "📂 Open Positions: 0",
+                    "",
+                    "💡 No trades recorded yet.",
+                    "Start trading to see analytics!",
+                    "",
+                    "Use /analytics for detailed reports"
+                ]
+            else:
+                message = [
+                    "📊 **DATABASE STATISTICS**",
+                    "=" * 35,
+                    "",
+                    f"✅ Status: Connected",
+                    f"📝 Total Trades: {int(stats.get('total_trades', 0))}",
+                    f"📂 Open Positions: {len(open_trades)}",
+                    f"✅ Wins: {int(stats.get('winning_trades', 0))}",
+                    f"❌ Losses: {int(stats.get('losing_trades', 0))}",
+                    f"📈 Win Rate: {float(stats.get('win_rate', 0)):.1f}%",
+                    "",
+                    f"💰 Total P&L: ${float(stats.get('total_pnl', 0)):+.2f}",
+                    f"🏆 Best Trade: ${float(stats.get('best_trade', 0)):+.2f}",
+                    f"📉 Worst Trade: ${float(stats.get('worst_trade', 0)):+.2f}",
+                    "",
+                    "Use /analytics for detailed reports"
+                ]
             
             await update.message.reply_text("\n".join(message), parse_mode='Markdown')
             
