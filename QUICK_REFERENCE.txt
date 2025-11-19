@@ -1,0 +1,157 @@
+╔════════════════════════════════════════════════════════════════════╗
+║                    HYPERBOT QUICK REFERENCE                         ║
+║                    Production Ready v2.0                            ║
+╚════════════════════════════════════════════════════════════════════╝
+
+⏰ BOT ACTIVITY SCHEDULE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CONTINUOUS MONITORING (24/7):
+├─ Main Trading Loop: Every 1 second
+│  └─ Checks market, runs strategies, executes trades
+├─ Account Updates: Every 5 seconds
+│  └─ Updates equity, margin, positions
+├─ Position Monitoring: Every 1 second
+│  └─ Tracks stop-loss, take-profit, trailing
+├─ Risk Checks: Every 10 seconds
+│  └─ Monitors drawdown, kill switch
+└─ ML Training: Every 24 hours
+   └─ Auto-retrains models on new data
+
+WHEN BOT IS "IDLE" (Still monitoring, just not trading):
+- Low volatility (<0.5% range)
+- Weekend low volume
+- Kill switch active (-5% loss)
+- Max positions reached
+- Risk engine blocking signals
+
+HIGH ACTIVITY PERIODS:
+- High volatility (>2% moves)
+- US/Europe market overlap (12:00-16:00 UTC)
+- Major news events
+- Strong trending markets
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📊 TRADING STRATEGY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SWING TRADING (70% allocation):
+├─ Target: 1-3% price moves
+├─ Stop-Loss: 1% (5% PnL at 5x leverage)
+├─ Take-Profit: 3% (15% PnL at 5x leverage)
+├─ Trailing SL: Activates at 7% PnL
+└─ Trailing TP: Activates at 10% PnL
+
+SCALPING (30% allocation):
+├─ Target: 0.4-0.8% price moves
+├─ Stop-Loss: 0.4% (2% PnL at 5x leverage)
+├─ Take-Profit: 0.8% (4% PnL at 5x leverage)
+└─ Duration: Seconds to minutes
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🛡️ RISK PROTECTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+KILL SWITCH: -5% daily loss → Auto-stop all trading
+DRAWDOWN MONITOR: 10% max from peak
+POSITION LIMITS: Max 2 concurrent, 5x leverage
+STOP-LOSS: Primary on exchange + backup monitoring
+TAKE-PROFIT: Trailing system locks profits
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+💬 TELEGRAM COMMANDS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+MONITORING:
+/status      - Bot status, balance, uptime
+/positions   - Active positions with P&L
+/trades      - Last 10 trades
+/pnl         - Daily/weekly breakdown
+/stats       - Strategy performance
+/logs        - Recent logs
+
+ANALYTICS:
+/analytics           - Full dashboard
+/analytics daily     - 30-day history
+/analytics symbols   - Best pairs
+/analytics hours     - Optimal times
+/analytics ml        - AI accuracy
+/dbstats            - Database health
+
+CONTROL:
+/help    - All commands
+/train   - Retrain ML models
+🚀 START - Resume trading
+🛑 STOP  - Pause trading
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🚀 DEPLOYMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ON VPS:
+1. cd /root/hyperbot
+2. git pull
+3. pm2 restart hyperbot
+4. pm2 logs hyperbot
+
+CHECK HEALTH:
+- Telegram: /status
+- Terminal: pm2 status hyperbot
+- Logs: pm2 logs --lines 50
+- Diagnostics: ./diagnose_vps.sh
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📁 FILES TO KEEP
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ESSENTIAL:
+✅ PRODUCTION_GUIDE.md - Full documentation
+✅ README.md - Quick start
+✅ .env - Your credentials (NOT in git)
+✅ requirements.txt - Dependencies
+✅ ecosystem.config.js - PM2 config
+✅ hyperbot.service - Systemd config
+✅ diagnose_vps.sh - Diagnostic tool
+✅ monitor.sh - Monitoring script
+
+ARCHIVED (in archive/ folder):
+📁 old_docs/ - Historical documentation
+📁 old_scripts/ - Old deployment scripts
+📁 tests/ - Test files
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🎯 PERFORMANCE TARGETS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Win Rate: 70% target
+Risk-Reward: 3:1 ratio
+Daily Target: +2% to +5%
+Max Daily Loss: -5% (kill switch)
+Trading Frequency: 10-50 trades/day
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+⚠️ IMPORTANT REMINDERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✓ Test on testnet first
+✓ Start with small capital ($50-100)
+✓ Monitor via Telegram daily
+✓ Review /analytics weekly
+✓ Update bot regularly (git pull)
+✓ Bot runs 24/7 but trading varies by market
+✓ Kill switch protects at -5% daily loss
+✓ All API keys masked in logs
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+For detailed information, see PRODUCTION_GUIDE.md
+Last Updated: November 19, 2025
+Version: 2.0 Production Ready
+
