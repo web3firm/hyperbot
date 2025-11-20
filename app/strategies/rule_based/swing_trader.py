@@ -72,11 +72,11 @@ class SwingTradingStrategy:
         self.rsi_pullback_short_low = 55  # For shorts (55-65)
         self.rsi_pullback_short_high = 65
         self.min_volume_ratio = Decimal('1.2')  # Institutional standard (was 1.5 - too restrictive)
-        self.min_adx = 15  # TEMPORARILY LOWERED for testing (was 25 - for production set back to 25)
-        self.min_signal_score = 5  # TEMPORARILY LOWERED for testing (was 6 - 75% threshold)
-        self.min_atr_pct = Decimal('0.1')  # TEMPORARILY LOWERED (was 0.2% based on 24h data analysis)
-        self.trading_hours_start = 0  # TEMPORARILY DISABLED for testing (was 2)
-        self.trading_hours_end = 23   # TEMPORARILY DISABLED for testing (was 15)
+        self.min_adx = 20  # Moderate trend required (lowered from 25 for more opportunities)
+        self.min_signal_score = 5  # Require 5/8 points (62.5% threshold, lowered from 6/8 for more trades)
+        self.min_atr_pct = Decimal('0.15')  # Minimum ATR % (lowered from 0.2% for more opportunities)
+        self.trading_hours_start = 0  # Trade 24/7 (was 2-15 UTC only)
+        self.trading_hours_end = 23   # Trade 24/7 (was 2-15 UTC only)
         
         # State tracking
         self.recent_prices = deque(maxlen=100)  # Need 100 for indicators
@@ -105,13 +105,13 @@ class SwingTradingStrategy:
         self.trades_executed = 0
         
         logger.info(f"📈 DATA-DRIVEN Swing Strategy initialized for {symbol}")
-        logger.info(f"   🎯 TARGET: 75% Win Rate | 3:1 R:R")
+        logger.info(f"   🎯 TARGET: 70% Win Rate | 3:1 R:R")
         logger.info(f"   Leverage: {self.leverage}x")
         logger.info(f"   TP: +{self.tp_pct}% PnL | SL: -{self.sl_pct}% PnL")
-        logger.info(f"   R:R Ratio: 1:{float(self.tp_pct/self.sl_pct)}")
+        logger.info(f"   R:R Ratio: 1:{float(self.tp_pct)/float(self.sl_pct):.1f}")
         logger.info(f"   RSI: {self.rsi_oversold}/{self.rsi_overbought} | EMA: {self.ema_fast}/{self.ema_slow}")
-        logger.info(f"   ADX: >{self.min_adx} (trend) | Score: {self.min_signal_score}/8 (75%)")
-        logger.info(f"   ATR: >{self.min_atr_pct}% (from 24h data) | Hours: {self.trading_hours_start:02d}-{self.trading_hours_end:02d} UTC (peak activity)")
+        logger.info(f"   ADX: >{self.min_adx} (moderate trend) | Score: {self.min_signal_score}/8 (62.5%)")
+        logger.info(f"   ATR: >{self.min_atr_pct}% | Hours: {self.trading_hours_start}-{self.trading_hours_end} UTC (24/7 trading)")
     
     def _calculate_rsi(self, prices: List[Decimal], period: int = 14) -> Optional[Decimal]:
         """
@@ -388,11 +388,11 @@ class SwingTradingStrategy:
         if bb is None:
             return None
         
-        # ADX - Trend Strength (ENTERPRISE FILTER)
+        # ADX - Trend Strength (BALANCED FILTER)
         adx = self._calculate_adx(prices_list, self.adx_period)
         if adx is None or adx < self.min_adx:
-            logger.info(f"⏭️  Swing: No signal - ADX {adx if adx else 'N/A'} < {self.min_adx} (need strong trend)")
-            return None  # Skip weak/choppy markets - only trade strong trends
+            # Logging removed for production - no spam
+            return None  # Skip weak/choppy markets - only trade moderate+ trends
         
         # ATR - Volatility for dynamic stops
         atr = self._calculate_atr(prices_list, self.atr_period)
