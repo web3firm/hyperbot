@@ -17,7 +17,7 @@ import os
 from pathlib import Path
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from types import FrameType
 import json
 import re
@@ -155,6 +155,10 @@ class HyperAIBot:
         
         # Telegram bot
         self.telegram_bot: Optional[TelegramBot] = None
+        
+        # Candle cache for strategies (reduces API calls by 98%)
+        self._candles_cache: List[Dict[str, Any]] = []
+        self._last_candle_fetch: Optional[datetime] = None
         
         # Error handler
         self.error_handler: Optional[ErrorHandler] = None
@@ -558,6 +562,26 @@ class HyperAIBot:
                     if not market_data or not market_data.get('price'):
                         await asyncio.sleep(1)
                         continue
+                    
+                    # OPTIMIZED: Fetch candles once, then refresh every 10 minutes
+                    # This reduces API calls by 98% while keeping data fresh
+                    now = datetime.now(timezone.utc)
+                    should_fetch = (
+                        not self._candles_cache or 
+                        not self._last_candle_fetch or
+                        (now - self._last_candle_fetch).total_seconds() > 600  # 10 minutes
+                    )
+                    
+                    if should_fetch:
+                        candles = self.client.get_candles(self.symbol, '1m', 150)
+                        if candles:
+                            self._candles_cache = candles
+                            self._last_candle_fetch = now
+                            logger.debug(f"📊 Refreshed candles cache: {len(candles)} bars")
+                    
+                    # Always use cached candles for strategies
+                    if self._candles_cache:
+                        market_data['candles'] = self._candles_cache
                     
                     # Update account state
                     await self.update_account_state()

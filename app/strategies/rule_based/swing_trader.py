@@ -320,7 +320,7 @@ class SwingTradingStrategy:
         Generate swing trading signal using technical indicators
         
         Args:
-            market_data: Current market data
+            market_data: Current market data (must include 'candles')
             account_state: Account state
             
         Returns:
@@ -338,19 +338,34 @@ class SwingTradingStrategy:
             return None
         
         current_price = Decimal(str(current_price))
-        current_volume = Decimal(str(market_data.get('volume', 0)))
         
-        # Store data
-        self.recent_prices.append(current_price)
-        if current_volume > 0:
-            self.recent_volumes.append(current_volume)
+        # CRITICAL: Get historical candles for indicator calculation
+        candles = market_data.get('candles', [])
+        if not candles or len(candles) < 100:
+            # Fallback: use stored prices if available
+            if len(self.recent_prices) < 100:
+                return None
+            prices_list = list(self.recent_prices)
+        else:
+            # Use candles to build price history
+            prices_list = [Decimal(str(c['close'])) for c in candles]
+            # Update recent_prices with latest data
+            self.recent_prices.clear()
+            for p in prices_list[-100:]:
+                self.recent_prices.append(p)
         
-        # Need sufficient data for indicators
-        if len(self.recent_prices) < 100:
-            return None
-        
-        # === CALCULATE ALL INDICATORS ===
-        prices_list = list(self.recent_prices)
+        # Get volume (from candles if available)
+        if candles:
+            current_volume = Decimal(str(candles[-1].get('volume', 0)))
+            volumes_list = [Decimal(str(c['volume'])) for c in candles[-50:]]
+            self.recent_volumes.clear()
+            for v in volumes_list:
+                if v > 0:
+                    self.recent_volumes.append(v)
+        else:
+            current_volume = Decimal(str(market_data.get('volume', 0)))
+            if current_volume > 0:
+                self.recent_volumes.append(current_volume)
         
         # RSI
         rsi = self._calculate_rsi(prices_list, self.rsi_period)

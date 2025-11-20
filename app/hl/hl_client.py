@@ -167,6 +167,44 @@ class HyperLiquidClient:
                 'error': str(e)
             }
     
+    def get_candles(self, symbol: str, interval: str = '1h', limit: int = 100) -> List[Dict[str, Any]]:
+        """
+        Get historical candle data for symbol
+        
+        Args:
+            symbol: Trading symbol (e.g., 'HYPE', 'SOL')
+            interval: Candle interval ('1m', '5m', '15m', '1h', '4h', '1d')
+            limit: Number of candles to fetch
+            
+        Returns:
+            List of candle dicts with keys: time, open, high, low, close, volume
+        """
+        try:
+            # HyperLiquid API candles endpoint
+            candles_data = self.info.candles_snapshot(symbol, interval, limit)
+            
+            if not candles_data:
+                logger.warning(f"No candle data received for {symbol}")
+                return []
+            
+            # Convert to standard format
+            candles = []
+            for candle in candles_data:
+                candles.append({
+                    'time': int(candle['t']),  # timestamp in ms
+                    'open': float(candle['o']),
+                    'high': float(candle['h']),
+                    'low': float(candle['l']),
+                    'close': float(candle['c']),
+                    'volume': float(candle['v'])
+                })
+            
+            return candles
+            
+        except Exception as e:
+            logger.error(f"Error fetching candles for {symbol}: {e}")
+            return []
+    
     async def get_market_price(self, symbol: str) -> Optional[Decimal]:
         """
         Get current market price for symbol
