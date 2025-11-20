@@ -180,8 +180,24 @@ class HyperLiquidClient:
             List of candle dicts with keys: time, open, high, low, close, volume
         """
         try:
-            # HyperLiquid API candles endpoint
-            candles_data = self.info.candles_snapshot(symbol, interval, limit)
+            import time
+            
+            # Calculate time range based on interval and limit
+            interval_ms = {
+                '1m': 60 * 1000,
+                '5m': 5 * 60 * 1000,
+                '15m': 15 * 60 * 1000,
+                '1h': 60 * 60 * 1000,
+                '4h': 4 * 60 * 60 * 1000,
+                '1d': 24 * 60 * 60 * 1000
+            }.get(interval, 60 * 60 * 1000)
+            
+            # HyperLiquid API requires startTime and endTime in milliseconds
+            end_time = int(time.time() * 1000)  # Current time in ms
+            start_time = end_time - (interval_ms * limit)  # Go back limit periods
+            
+            # Fetch candles
+            candles_data = self.info.candles_snapshot(symbol, interval, start_time, end_time)
             
             if not candles_data:
                 logger.warning(f"No candle data received for {symbol}")
@@ -199,6 +215,7 @@ class HyperLiquidClient:
                     'volume': float(candle['v'])
                 })
             
+            logger.debug(f"📊 Fetched {len(candles)} candles for {symbol}")
             return candles
             
         except Exception as e:
