@@ -72,11 +72,11 @@ class SwingTradingStrategy:
         self.rsi_pullback_short_low = 55  # For shorts (55-65)
         self.rsi_pullback_short_high = 65
         self.min_volume_ratio = Decimal('1.2')  # Institutional standard (was 1.5 - too restrictive)
-        self.min_adx = 25  # Strong trend required (>25 = trending market)
-        self.min_signal_score = 6  # Require 6/8 points (75% threshold for higher quality)
-        self.min_atr_pct = Decimal('0.2')  # Minimum ATR % (0.2% based on 24h data analysis)
-        self.trading_hours_start = 2  # UTC 2am (real market activity starts here)
-        self.trading_hours_end = 15   # UTC 3pm (covers all peak hours: 2-3am, 6am, 10am, 2pm)
+        self.min_adx = 15  # TEMPORARILY LOWERED for testing (was 25 - for production set back to 25)
+        self.min_signal_score = 5  # TEMPORARILY LOWERED for testing (was 6 - 75% threshold)
+        self.min_atr_pct = Decimal('0.1')  # TEMPORARILY LOWERED (was 0.2% based on 24h data analysis)
+        self.trading_hours_start = 0  # TEMPORARILY DISABLED for testing (was 2)
+        self.trading_hours_end = 23   # TEMPORARILY DISABLED for testing (was 15)
         
         # State tracking
         self.recent_prices = deque(maxlen=100)  # Need 100 for indicators
@@ -391,6 +391,7 @@ class SwingTradingStrategy:
         # ADX - Trend Strength (ENTERPRISE FILTER)
         adx = self._calculate_adx(prices_list, self.adx_period)
         if adx is None or adx < self.min_adx:
+            logger.info(f"⏭️  Swing: No signal - ADX {adx if adx else 'N/A'} < {self.min_adx} (need strong trend)")
             return None  # Skip weak/choppy markets - only trade strong trends
         
         # ATR - Volatility for dynamic stops
