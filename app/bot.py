@@ -225,6 +225,10 @@ class HyperAIBot:
             self.websocket.on_candle_callbacks.append(self._on_new_candle)
             logger.info("📊 Registered real-time candle callback")
             
+            # PHASE 4: Register order update callback for instant notifications
+            self.websocket.on_order_update_callbacks.append(self._on_order_update)
+            logger.info("⚡ Registered real-time order update callback")
+            
             # Initialize Order Manager V2 (uses SDK bulk_orders)
             self.order_manager = HLOrderManagerV2(self.client)
             
@@ -358,12 +362,63 @@ class HyperAIBot:
     
     def _on_new_candle(self, symbol: str, candle: Dict[str, Any]):
         """
-        Callback for real-time candle updates (Phase 3)
+        Callback for real-time candle updates (Phase 3 + Phase 4)
         Triggers indicator recalculation on new candle
         """
         if symbol == self.symbol:
             self._candle_update_pending = True
-            logger.debug(f"🕯️ New candle received for {symbol}, indicators need refresh")
+            
+            # PHASE 4: Invalidate strategy indicator cache on new candle
+            if hasattr(self.strategy, 'invalidate_indicator_cache'):
+                self.strategy.invalidate_indicator_cache()
+                logger.debug(f"🕯️ New candle for {symbol} - invalidated indicator cache")
+            else:
+                logger.debug(f"🕯️ New candle received for {symbol}, indicators need refresh")
+    
+    def _on_order_update(self, update: Dict[str, Any]):
+        """
+        Callback for real-time order updates (PHASE 4)
+        Sends instant Telegram notifications when orders fill/cancel/trigger
+        """
+        try:
+            status = update.get('status')
+            order = update.get('order', {})
+            
+            coin = order.get('coin', 'UNKNOWN')
+            side = order.get('side', 'unknown')
+            size = order.get('sz', 0)
+            price = order.get('limitPx') or order.get('triggerPx', 0)
+            
+            # Send Telegram notification for important events
+            if self.telegram_bot and status in ['filled', 'triggered', 'canceled']:
+                message = None
+                
+                if status == 'filled':
+                    message = f"✅ **ORDER FILLED**\\n\\n{coin} {side.upper()} {size} @ ${price}"
+                elif status == 'triggered':
+                    # Stop loss or take profit triggered
+                    order_type = order.get('orderType', 'stop')
+                    if 'tp' in order_type.lower():
+                        message = f"🎯 **TAKE PROFIT HIT**\\n\\n{coin} closed @ ${price}\\nProfit secured! 💰"
+                    else:
+                        message = f"🛑 **STOP LOSS HIT**\\n\\n{coin} closed @ ${price}\\nLoss limited, capital protected."
+                elif status == 'canceled':
+                    message = f"🚫 **ORDER CANCELLED**\\n\\n{coin} {side.upper()} {size} @ ${price}"
+                
+                if message:
+                    # Send async notification (don't block)
+                    asyncio.create_task(self._send_order_notification(message))
+                    
+        except Exception as e:
+            logger.error(f"Error in order update callback: {e}")
+    
+    async def _send_order_notification(self, message: str):
+        """Send Telegram notification asynchronously"""
+        try:
+            if self.telegram_bot:
+                await self.telegram_bot.send_message(message)
+        except Exception as e:
+            logger.debug(f"Telegram notification failed: {e}")
     
     async def _monitor_positions(self, account_state: Dict[str, Any]):
         """

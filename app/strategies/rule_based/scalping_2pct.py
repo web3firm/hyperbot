@@ -44,15 +44,11 @@ class ScalpingStrategy2Pct:
         self.sl_pct = Decimal(os.getenv('STOP_LOSS_PCT', '1.0'))
         self.position_size_pct = Decimal(os.getenv('POSITION_SIZE_PCT', '70.0'))
         
-        # Entry conditions - IMPROVED for better win rate
-        # With 5x leverage, need higher threshold to overcome fees (~0.1% total cost)
-        self.min_momentum_threshold = Decimal('0.3')  # 0.3% momentum = 1.5% PnL with 5x
-        self.volume_multiplier = Decimal('1.5')  # 50% above average volume for confirmation
-        self.confirmation_bars = 2  # Require 2 consecutive bars in same direction
-        
-        # Trend filter - only trade with the trend
-        self.trend_lookback = 50  # Use 50 bars for trend
-        self.min_trend_strength = Decimal('0.5')  # 0.5% move to confirm trend
+        self.min_momentum_threshold = Decimal('0.3')
+        self.volume_multiplier = Decimal('1.5')
+        self.confirmation_bars = 2
+        self.trend_lookback = 50
+        self.min_trend_strength = Decimal('0.5')
         
         # State tracking
         self.recent_prices = deque(maxlen=50)  # Increased for trend analysis

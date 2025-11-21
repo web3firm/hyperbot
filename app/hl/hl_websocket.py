@@ -36,6 +36,8 @@ class HLWebSocket:
         self.orderbooks: Dict[str, Dict] = {}
         self.recent_trades: Dict[str, deque] = {}
         self.candles: Dict[str, Dict] = {}
+        self._max_candles = 100  # PHASE 4: Memory optimization
+        self._max_trades = 100   # PHASE 4: Memory optimization
         self.prices: Dict[str, Decimal] = {}
         
         # Account data storage (replaces polling!)
@@ -51,16 +53,18 @@ class HLWebSocket:
         self.on_candle_callbacks: List[Callable] = []
         self.on_position_callbacks: List[Callable] = []  # NEW
         self.on_fill_callbacks: List[Callable] = []      # NEW
+        self.on_order_update_callbacks: List[Callable] = []  # PHASE 4: Real-time order updates
         
         # Initialize storage for symbols
         for symbol in self.symbols:
-            self.recent_trades[symbol] = deque(maxlen=100)
+            self.recent_trades[symbol] = deque(maxlen=self._max_trades)
             self.candles[symbol] = {}
             self.orderbooks[symbol] = {'bids': [], 'asks': []}
         
         logger.info(f"📡 HyperLiquid WebSocket V2 initialized for {self.symbols}")
         if account_address:
             logger.info(f"📊 Account updates enabled for {account_address[:10]}...")
+            logger.info(f"🚀 PHASE 4: Real-time order updates enabled")
     
     async def start(self, info_client=None):
         """
@@ -81,7 +85,14 @@ class HLWebSocket:
                     {"type": "userEvents", "user": self.account_address},
                     self._handle_user_event
                 )
-                logger.info(f"✅ Subscribed to account updates for {self.account_address[:10]}...")
+                
+                # PHASE 4: Subscribe to order updates (fills, cancels, triggers)
+                info_client.subscribe(
+                    {"type": "orderUpdates", "user": self.account_address},
+                    self._handle_order_update
+                )
+                
+                logger.info(f"✅ Subscribed to account + order updates for {self.account_address[:10]}...")
             except Exception as e:
                 logger.warning(f"⚠️ Could not subscribe to user events: {e}")
                 logger.info("📊 Falling back to polling for account data")
@@ -145,6 +156,49 @@ class HLWebSocket:
             
         except Exception as e:
             logger.error(f"Error handling user event: {e}")
+    
+    def _handle_order_update(self, update: Dict[str, Any]):
+        """
+        Handle real-time order updates (PHASE 4)
+        
+        Triggers on:
+        - Order filled (partial or full)
+        - Order cancelled
+        - Stop loss/take profit triggered
+        - Order rejected
+        
+        Provides instant notifications vs waiting for next loop iteration
+        """
+        try:
+            status = update.get('status')
+            order = update.get('order', {})
+            
+            coin = order.get('coin', 'UNKNOWN')
+            side = order.get('side', 'unknown')
+            size = order.get('sz', 0)
+            price = order.get('limitPx') or order.get('triggerPx', 0)
+            
+            # Log different order events
+            if status == 'filled':
+                logger.info(f"✅ ORDER FILLED: {coin} {side} {size} @ {price}")
+            elif status == 'canceled':
+                logger.info(f"🚫 ORDER CANCELLED: {coin} {side} {size} @ {price}")
+            elif status == 'triggered':
+                logger.info(f"⚡ STOP TRIGGERED: {coin} {side} {size} @ {price}")
+            elif status == 'rejected':
+                logger.error(f"❌ ORDER REJECTED: {coin} {side} {size} @ {price}")
+            else:
+                logger.debug(f"🔄 Order update: {status} - {coin} {side}")
+            
+            # Notify callbacks for immediate action (e.g., Telegram alerts)
+            for callback in self.on_order_update_callbacks:
+                try:
+                    callback(update)
+                except Exception as e:
+                    logger.error(f"Order update callback error: {e}")
+                    
+        except Exception as e:
+            logger.error(f"Error handling order update: {e}")
     
     def _update_positions(self, event: Dict[str, Any]):
         """Update internal positions cache from WebSocket data"""
@@ -219,6 +273,11 @@ class HLWebSocket:
                 'close': float(candle.get('c', 0)),
                 'volume': float(candle.get('v', 0))
             }
+            # PHASE 4: Limit candle history to last 100
+            if len(self.candles[symbol]) > self._max_candles:
+                # Remove oldest candle(s)
+                for old_ts in sorted(self.candles[symbol])[:-self._max_candles]:
+                    del self.candles[symbol][old_ts]
             
             logger.debug(f"📊 Candle update: {symbol} close=${candle.get('c')}")
             
