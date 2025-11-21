@@ -22,6 +22,8 @@ class HLOrderManagerV2:
     
     def __init__(self, client):
         self.client = client
+        # Track order IDs for modification
+        self.position_orders = {}  # {symbol: {'sl_oid': int, 'tp_oid': int, 'size': float, 'is_long': bool}}
         logger.info("📋 Order Manager V2 initialized (using SDK native methods)")
     
     async def place_market_order_with_stops(
@@ -100,6 +102,33 @@ class HLOrderManagerV2:
         try:
             result = self.client.exchange.bulk_orders(orders)
             
+            # Extract order IDs from response for tracking
+            if result.get('status') == 'ok':
+                response = result.get('response', {})
+                data = response.get('data', {})
+                statuses = data.get('statuses', [])
+                
+                # Track order IDs for later modification
+                order_ids = {}
+                for i, status in enumerate(statuses):
+                    if isinstance(status, dict) and 'resting' in status:
+                        oid = status['resting'].get('oid')
+                        if i == 0:  # Market order
+                            pass
+                        elif i == 1 and sl_price:  # SL order
+                            order_ids['sl_oid'] = oid
+                        elif i == 2 and tp_price:  # TP order
+                            order_ids['tp_oid'] = oid
+                
+                # Store order info for trailing
+                if order_ids:
+                    self.position_orders[symbol] = {
+                        **order_ids,
+                        'size': size,
+                        'is_long': is_buy
+                    }
+                    logger.debug(f"📝 Stored order IDs: {order_ids}")
+            
             logger.info(f"✅ Bulk order placed: Market + {len(orders)-1} stops")
             return {
                 'success': True,
@@ -116,21 +145,84 @@ class HLOrderManagerV2:
     async def modify_stops(
         self,
         symbol: str,
-        side: str,
-        size: float,
         new_sl: Optional[float] = None,
         new_tp: Optional[float] = None
     ) -> Dict[str, Any]:
         """
-        Modify existing SL/TP orders
+        Modify existing SL/TP trigger prices
         
-        Uses SDK's bulk_modify_orders_new() - ONE API call!
+        Uses SDK's modify_order() to update triggers in place
+        Much faster than cancelling and recreating orders
         """
-        # Cancel existing stops and place new ones
-        # Could also use modify_order() for individual updates
-        return await self.place_market_order_with_stops(
-            symbol, side, size, new_sl, new_tp
-        )
+        try:
+            if symbol not in self.position_orders:
+                logger.warning(f"⚠️  No tracked orders for {symbol}")
+                return {'success': False, 'error': 'No orders tracked'}
+            
+            order_info = self.position_orders[symbol]
+            modified = []
+            
+            # Modify SL order
+            if new_sl and 'sl_oid' in order_info:
+                try:
+                    result = self.client.exchange.modify_order(
+                        oid=order_info['sl_oid'],
+                        name=symbol,
+                        is_buy=not order_info['is_long'],  # Opposite side
+                        sz=order_info['size'],
+                        limit_px=new_sl,
+                        order_type={
+                            'trigger': {
+                                'triggerPx': new_sl,
+                                'isMarket': True,
+                                'tpsl': 'sl'
+                            }
+                        },
+                        reduce_only=True
+                    )
+                    if result.get('status') == 'ok':
+                        modified.append('SL')
+                        logger.info(f"📍 Updated SL to ${new_sl:.3f}")
+                except Exception as e:
+                    logger.error(f"❌ Failed to modify SL: {e}")
+            
+            # Modify TP order
+            if new_tp and 'tp_oid' in order_info:
+                try:
+                    result = self.client.exchange.modify_order(
+                        oid=order_info['tp_oid'],
+                        name=symbol,
+                        is_buy=not order_info['is_long'],  # Opposite side
+                        sz=order_info['size'],
+                        limit_px=new_tp,
+                        order_type={
+                            'trigger': {
+                                'triggerPx': new_tp,
+                                'isMarket': True,
+                                'tpsl': 'tp'
+                            }
+                        },
+                        reduce_only=True
+                    )
+                    if result.get('status') == 'ok':
+                        modified.append('TP')
+                        logger.info(f"🎯 Updated TP to ${new_tp:.3f}")
+                except Exception as e:
+                    logger.error(f"❌ Failed to modify TP: {e}")
+            
+            if modified:
+                return {
+                    'success': True,
+                    'modified': modified,
+                    'sl_price': new_sl,
+                    'tp_price': new_tp
+                }
+            else:
+                return {'success': False, 'error': 'No orders modified'}
+                
+        except Exception as e:
+            logger.error(f"❌ Error modifying stops: {e}")
+            return {'success': False, 'error': str(e)}
     
     async def cancel_all_orders(self, symbol: str) -> Dict[str, Any]:
         """

@@ -395,15 +395,20 @@ class HyperAIBot:
                     logger.info(f"📈 Active position: {symbol} | Size: {size:.2f} | "
                                f"Entry: ${entry_price:.3f} | Current: ${current_price:.3f} | P&L: ${unrealized_pnl:+.2f} ({unrealized_pnl_pct:+.1f}%)")
                 
-                # BACKUP SAFETY: Check if SL/TP should have triggered but didn't
-                if hasattr(self.order_manager, 'position_targets') and symbol in self.order_manager.position_targets:
-                    targets = self.order_manager.position_targets[symbol]
-                    sl_price = targets.get('sl_price')
-                    tp_price = targets.get('tp_price')
+                # DYNAMIC TRAILING STOPS - Lock in profits as they grow!
+                # Uses OrderManagerV2 position tracking (no need for position_targets)
+                if symbol in self.order_manager.position_orders:
+                    order_info = self.order_manager.position_orders[symbol]
                     is_long = size > 0
                     
                     should_close = False
                     close_reason = ""
+                    needs_update = False
+                    new_sl = None
+                    new_tp = None
+                    
+                    # Get current order IDs from open orders (for validation)
+                    # This ensures we have valid orders to modify
                     
                     # **TRAILING STOP-LOSS + TAKE-PROFIT LOGIC** - Lock in profits dynamically!
                     # NOTE: With 5% SL / 15% TP PnL targets and 5x leverage:
@@ -416,95 +421,67 @@ class HyperAIBot:
                         # Calculate breakeven + buffer
                         if is_long:
                             # Move SL to breakeven + 0.5% PRICE (= 2.5% PnL with 5x)
-                            trailing_sl = entry_price * Decimal('1.005')  # +0.5% price from entry
-                            if sl_price and trailing_sl > sl_price:
-                                logger.info(f"🔒 TRAILING SL: At {unrealized_pnl_pct:.1f}% PnL - Moving SL from ${sl_price:.3f} to ${trailing_sl:.3f} (locks +2.5% PnL min)")
-                                targets['sl_price'] = trailing_sl
+                            trailing_sl = float(entry_price * Decimal('1.005'))  # +0.5% price from entry
+                            # Check if this is better than current (if we have SL order)
+                            if 'sl_oid' in order_info:
+                                logger.info(f"🔒 TRAILING SL: At {unrealized_pnl_pct:.1f}% PnL - Moving SL to ${trailing_sl:.3f} (locks +2.5% PnL min)")
+                                new_sl = trailing_sl
+                                needs_update = True
                         else:
                             # Short position - move SL down
-                            trailing_sl = entry_price * Decimal('0.995')  # -0.5% price from entry
-                            if sl_price and trailing_sl < sl_price:
-                                logger.info(f"🔒 TRAILING SL: At {unrealized_pnl_pct:.1f}% PnL - Moving SL from ${sl_price:.3f} to ${trailing_sl:.3f} (locks +2.5% PnL min)")
-                                targets['sl_price'] = trailing_sl
+                            trailing_sl = float(entry_price * Decimal('0.995'))  # -0.5% price from entry
+                            if 'sl_oid' in order_info:
+                                logger.info(f"🔒 TRAILING SL: At {unrealized_pnl_pct:.1f}% PnL - Moving SL to ${trailing_sl:.3f} (locks +2.5% PnL min)")
+                                new_sl = trailing_sl
+                                needs_update = True
                     
                     # **TRAILING TAKE-PROFIT** - Move TP closer as profit increases
-                    if unrealized_pnl_pct >= 10.0 and tp_price:  # At 10% PnL (~66% of 15% target)
+                    if unrealized_pnl_pct >= 10.0:  # At 10% PnL (~66% of 15% target)
                         if is_long:
                             # Move TP to 2.4% PRICE (= 12% PnL target with 5x) instead of 3%
-                            trailing_tp = entry_price * Decimal('1.024')  # +2.4% price from entry
-                            if trailing_tp < tp_price:  # Only move TP closer, never further
-                                logger.info(f"🎯 TRAILING TP: At {unrealized_pnl_pct:.1f}% PnL - Moving TP from ${tp_price:.3f} to ${trailing_tp:.3f} (targets +12% PnL)")
-                                targets['tp_price'] = trailing_tp
+                            trailing_tp = float(entry_price * Decimal('1.024'))  # +2.4% price from entry
+                            if 'tp_oid' in order_info:
+                                logger.info(f"🎯 TRAILING TP: At {unrealized_pnl_pct:.1f}% PnL - Moving TP to ${trailing_tp:.3f} (targets +12% PnL)")
+                                new_tp = trailing_tp
+                                needs_update = True
                         else:
                             # Short position - move TP up
-                            trailing_tp = entry_price * Decimal('0.976')  # -2.4% price
-                            if trailing_tp > tp_price:  # Only move TP closer
-                                logger.info(f"🎯 TRAILING TP: At {unrealized_pnl_pct:.1f}% PnL - Moving TP from ${tp_price:.3f} to ${trailing_tp:.3f} (targets +12% PnL)")
-                                targets['tp_price'] = trailing_tp
+                            trailing_tp = float(entry_price * Decimal('0.976'))  # -2.4% price
+                            if 'tp_oid' in order_info:
+                                logger.info(f"🎯 TRAILING TP: At {unrealized_pnl_pct:.1f}% PnL - Moving TP to ${trailing_tp:.3f} (targets +12% PnL)")
+                                new_tp = trailing_tp
+                                needs_update = True
                     
                     # Additional trailing at 12%+ PnL - move TP even closer
-                    if unrealized_pnl_pct >= 12.0 and tp_price:  # At 12% PnL (80% of 15% target)
+                    if unrealized_pnl_pct >= 12.0:  # At 12% PnL (80% of 15% target)
                         if is_long:
                             # Move TP to just 0.4% PRICE above current (aggressive lock)
-                            trailing_tp = current_price * Decimal('1.004')  # Just +0.4% price above current
-                            if trailing_tp < tp_price:
+                            trailing_tp = float(current_price * Decimal('1.004'))  # Just +0.4% price above current
+                            if 'tp_oid' in order_info:
                                 logger.info(f"🔥 AGGRESSIVE TRAILING TP: At {unrealized_pnl_pct:.1f}% PnL - Moving TP to ${trailing_tp:.3f} (near current, locks ~{unrealized_pnl_pct:.0f}% PnL)")
-                                targets['tp_price'] = trailing_tp
+                                new_tp = trailing_tp
+                                needs_update = True
                         else:
-                            trailing_tp = current_price * Decimal('0.996')  # Just -0.4% price below current
-                            if trailing_tp > tp_price:
+                            trailing_tp = float(current_price * Decimal('0.996'))  # Just -0.4% price below current
+                            if 'tp_oid' in order_info:
                                 logger.info(f"🔥 AGGRESSIVE TRAILING TP: At {unrealized_pnl_pct:.1f}% PnL - Moving TP to ${trailing_tp:.3f} (near current, locks ~{unrealized_pnl_pct:.0f}% PnL)")
-                                targets['tp_price'] = trailing_tp
+                                new_tp = trailing_tp
+                                needs_update = True
                     
-                    # Check if SL breached
-                    if sl_price:
-                        if is_long and current_price <= sl_price:
-                            should_close = True
-                            close_reason = f"BACKUP SL triggered: price ${current_price:.3f} <= SL ${sl_price:.3f}"
-                        elif not is_long and current_price >= sl_price:
-                            should_close = True
-                            close_reason = f"BACKUP SL triggered: price ${current_price:.3f} >= SL ${sl_price:.3f}"
-                    
-                    # Check if TP breached
-                    if tp_price and not should_close:
-                        if is_long and current_price >= tp_price:
-                            should_close = True
-                            close_reason = f"BACKUP TP triggered: price ${current_price:.3f} >= TP ${tp_price:.3f}"
-                        elif not is_long and current_price <= tp_price:
-                            should_close = True
-                            close_reason = f"BACKUP TP triggered: price ${current_price:.3f} <= TP ${tp_price:.3f}"
-                    
-                    # Emergency close position if SL/TP orders failed
-                    if should_close:
-                        logger.critical(f"🚨 {close_reason}")
-                        logger.critical(f"🚨 Emergency closing position (SL/TP orders may have failed)")
-                        
-                        # Send Telegram alert
-                        if self.telegram_bot:
-                            try:
-                                await self.telegram_bot.notify_warning(
-                                    f"⚠️ EMERGENCY CLOSE\n{symbol}\n{close_reason}\nClosing position now!"
-                                )
-                            except:
-                                pass
-                        
-                        # Close position immediately
+                    # ✅ ACTUALLY UPDATE ORDERS ON EXCHANGE (Phase 3 fix!)
+                    if needs_update:
                         try:
-                            close_side = 'sell' if is_long else 'buy'
-                            result = await self.order_manager.place_market_order(
-                                symbol,
-                                close_side,
-                                abs(Decimal(str(size)))
+                            result = await self.order_manager.modify_stops(
+                                symbol=symbol,
+                                new_sl=new_sl,
+                                new_tp=new_tp
                             )
-                            
                             if result.get('success'):
-                                logger.info(f"✅ Emergency close successful")
-                                # Clean up targets
-                                del self.order_manager.position_targets[symbol]
+                                logger.info(f"✅ Trailing stops updated on exchange: {result.get('modified', [])}")
                             else:
-                                logger.error(f"❌ Emergency close failed: {result.get('error')}")
+                                logger.warning(f"⚠️ Failed to update trailing stops: {result.get('error')}")
                         except Exception as e:
-                            logger.error(f"❌ Emergency close error: {e}", exc_info=True)
+                            logger.error(f"❌ Error updating trailing stops: {e}")
                 
                 # Check if approaching SL/TP levels (warning system)
                 if unrealized_pnl_pct <= -0.8:  # Within 80% of typical -1% SL
