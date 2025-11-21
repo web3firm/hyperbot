@@ -48,8 +48,8 @@ class HyperLiquidClient:
             account_address=account_address
         )
         
-        # Initialize Info for market data
-        self.info = Info(base_url, skip_ws=True)
+        # Initialize Info for market data (enable WebSocket for subscriptions)
+        self.info = Info(base_url, skip_ws=False)
         
         # Cache asset metadata for decimal precision
         self._asset_metadata = {}

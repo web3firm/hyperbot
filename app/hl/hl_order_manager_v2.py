@@ -162,6 +162,31 @@ class HLOrderManagerV2:
         return await self.place_market_order_with_stops(
             symbol, side, size, sl_price, tp_price
         )
+    
+    async def set_leverage(self, symbol: str, leverage: int) -> bool:
+        """
+        Set leverage for a symbol
+        
+        Args:
+            symbol: Trading symbol
+            leverage: Leverage value (1-50)
+            
+        Returns:
+            True if successful
+        """
+        try:
+            result = self.client.exchange.update_leverage(leverage, symbol, is_cross=True)
+            success = result.get('status') == 'ok'
+            
+            if success:
+                logger.info(f"✅ Leverage set to {leverage}x for {symbol}")
+            else:
+                logger.error(f"❌ Failed to set leverage: {result}")
+            
+            return success
+        except Exception as e:
+            logger.error(f"❌ Error setting leverage: {e}")
+            return False
 
 
 # Example usage:

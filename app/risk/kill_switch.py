@@ -101,22 +101,24 @@ class KillSwitch:
         
         # 2. Check drawdown trigger
         equity = self.account_manager.current_equity
-        drawdown_pct = (self.account_manager.peak_equity - equity) / self.account_manager.peak_equity * 100
-        if drawdown_pct >= self.drawdown_trigger_pct:
-            self.trigger(
-                TriggerReason.DRAWDOWN,
-                f"Drawdown {drawdown_pct:.2f}% >= {self.drawdown_trigger_pct}%"
-            )
-            return True
+        if self.account_manager.peak_equity > 0:  # Prevent division by zero
+            drawdown_pct = (self.account_manager.peak_equity - equity) / self.account_manager.peak_equity * 100
+            if drawdown_pct >= self.drawdown_trigger_pct:
+                self.trigger(
+                    TriggerReason.DRAWDOWN,
+                    f"Drawdown {drawdown_pct:.2f}% >= {self.drawdown_trigger_pct}%"
+                )
+                return True
         
         # 3. Check margin call
-        margin_usage_pct = (self.account_manager.margin_used / equity) * 100
-        if margin_usage_pct >= self.margin_call_trigger_pct:
-            self.trigger(
-                TriggerReason.MARGIN_CALL,
-                f"Margin usage {margin_usage_pct:.2f}% >= {self.margin_call_trigger_pct}%"
-            )
-            return True
+        if equity > 0:  # Prevent division by zero
+            margin_usage_pct = (self.account_manager.margin_used / equity) * 100
+            if margin_usage_pct >= self.margin_call_trigger_pct:
+                self.trigger(
+                    TriggerReason.MARGIN_CALL,
+                    f"Margin usage {margin_usage_pct:.2f}% >= {self.margin_call_trigger_pct}%"
+                )
+                return True
         
         # 4. Check position losses
         for symbol, position in self.position_manager.open_positions.items():
