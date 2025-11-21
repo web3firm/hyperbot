@@ -91,10 +91,19 @@ class HyperLiquidClient:
     async def get_account_state(self) -> Dict[str, Any]:
         """
         Get account balance and positions
+        OPTIMIZED: Uses WebSocket cache if available (instant, no API call!)
         
         Returns:
             Account state with balance, positions, margin
         """
+        # OPTIMIZATION: Use WebSocket data if available
+        if hasattr(self, 'websocket') and self.websocket and self.websocket.account_address:
+            ws_state = self.websocket.get_account_state()
+            if ws_state['account_value'] > 0:  # Valid data in cache
+                logger.debug("📊 Account from WebSocket (0ms, no API call)")
+                return ws_state
+        
+        # Fallback to API polling
         try:
             user_state = self.info.user_state(self.account_address)
             
