@@ -71,12 +71,12 @@ class SwingTradingStrategy:
         self.rsi_pullback_high = 45  # For early entries in strong trends
         self.rsi_pullback_short_low = 55  # For shorts (55-65)
         self.rsi_pullback_short_high = 65
-        self.min_volume_ratio = Decimal('1.2')  # Institutional standard (was 1.5 - too restrictive)
-        self.min_adx = 20  # Moderate trend required (lowered from 25 for more opportunities)
-        self.min_signal_score = 5  # Require 5/8 points (62.5% threshold, lowered from 6/8 for more trades)
-        self.min_atr_pct = Decimal('0.15')  # Minimum ATR % (lowered from 0.2% for more opportunities)
-        self.trading_hours_start = 0  # Trade 24/7 (was 2-15 UTC only)
-        self.trading_hours_end = 23   # Trade 24/7 (was 2-15 UTC only)
+        self.min_volume_ratio = Decimal('1.2')  # Keep standards high for quality trades
+        self.min_adx = 20  # Moderate trend required
+        self.min_signal_score = 5  # Require 5/8 points (62.5% threshold)
+        self.min_atr_pct = Decimal('0.15')  # Minimum ATR %
+        self.trading_hours_start = 0  # Trade 24/7
+        self.trading_hours_end = 23   # Trade 24/7
         
         # State tracking
         self.recent_prices = deque(maxlen=100)  # Need 100 for indicators
@@ -412,29 +412,27 @@ class SwingTradingStrategy:
         score = 0  # Signal strength score (need 5/8 for 70% win rate)
         reasons = []
         
-        # LONG SIGNAL CONDITIONS (More strict than before)
-        # Option 1: Extreme oversold (traditional)
+        # LONG SIGNAL CONDITIONS
+        # Option 1: Extreme oversold
         if trend == 'up' and rsi < self.rsi_oversold:
             score += 3  # RSI extreme oversold in uptrend
             reasons.append(f"RSI oversold ({rsi:.1f} < {self.rsi_oversold})")
         
-        # Option 2: Healthy pullback zone (earlier entry in strong trend)
+        # Option 2: Healthy pullback zone
         elif trend == 'up' and self.rsi_pullback_low <= rsi <= self.rsi_pullback_high:
-            score += 2  # RSI pullback (35-45) - catches dip before oversold
+            score += 2  # RSI pullback (35-45)
             reasons.append(f"RSI pullback zone ({rsi:.1f} in 35-45)")
         
-        # Additional LONG scoring (applies to both options)
+        # Additional LONG scoring
         if trend == 'up' and (rsi < self.rsi_oversold or (self.rsi_pullback_low <= rsi <= self.rsi_pullback_high)):
             if current_price < bb['lower']:
-                score += 2  # Price below lower BB (mean reversion opportunity)
+                score += 2  # Price below lower BB
                 reasons.append(f"Below BB lower by {((bb['lower'] - current_price) / current_price * 100):.2f}%")
             
-            # MACD line crossing signal line = early momentum shift (better than histogram)
             if macd['macd'] > macd['signal']:
-                score += 1  # MACD bullish momentum (cross up)
+                score += 1  # MACD bullish momentum
                 reasons.append(f"MACD cross up ({macd['macd']:.4f} > {macd['signal']:.4f})")
             
-            # Bonus point if RSI showing momentum reversal (crossing up from deep oversold)
             if self.prev_rsi and self.prev_rsi < 28 and rsi > 28:
                 score += 1  # RSI momentum turning
                 reasons.append(f"RSI momentum up (prev: {self.prev_rsi:.1f} → {rsi:.1f})")
@@ -443,26 +441,26 @@ class SwingTradingStrategy:
                 score += 1  # High volume confirmation
                 reasons.append(f"Volume {volume_ratio:.2f}x avg")
             
-            if adx > 30:  # Extra strong trend
-                score += 1  # Bonus point for very strong trend
+            if adx > 30:
+                score += 1  # Bonus for very strong trend
                 reasons.append(f"ADX strong ({adx:.1f})")
             
-            if score >= self.min_signal_score:  # Need 5/8 points
+            if score >= self.min_signal_score:
                 signal_type = 'long'
         
-        # SHORT SIGNAL CONDITIONS (More strict than before)
-        # Option 1: Extreme overbought (traditional)
+        # SHORT SIGNAL CONDITIONS
+        # Option 1: Extreme overbought
         elif trend == 'down' and rsi > self.rsi_overbought:
             score += 3  # RSI extreme overbought in downtrend
             reasons.append(f"RSI overbought ({rsi:.1f} > {self.rsi_overbought})")
         
-        # Option 2: Healthy pullback zone (earlier entry in strong downtrend)
+        # Option 3: Healthy pullback zone (earlier entry in strong downtrend)
         elif trend == 'down' and self.rsi_pullback_short_low <= rsi <= self.rsi_pullback_short_high:
             score += 2  # RSI pullback (55-65) - catches rally before overbought
             reasons.append(f"RSI pullback zone ({rsi:.1f} in 55-65)")
         
-        # Additional SHORT scoring (applies to both options)
-        if trend == 'down' and (rsi > self.rsi_overbought or (self.rsi_pullback_short_low <= rsi <= self.rsi_pullback_short_high)):
+        # Additional SHORT scoring (applies to all short conditions)
+        if trend == 'down' and (rsi < 35 or rsi > self.rsi_overbought or (self.rsi_pullback_short_low <= rsi <= self.rsi_pullback_short_high)):
             if current_price > bb['upper']:
                 score += 2  # Price above upper BB
                 reasons.append(f"Above BB upper by {((current_price - bb['upper']) / current_price * 100):.2f}%")
@@ -489,15 +487,16 @@ class SwingTradingStrategy:
                 signal_type = 'short'
         
         if signal_type is None:
+            # Debug: Log why no signal generated
+            logger.info(f"⏭️ No signal - Trend: {trend}, RSI: {rsi:.1f}, ADX: {adx:.1f}, Score: {score}/{self.min_signal_score}")
             return None  # No valid setup
         
         # === VOLATILITY FILTER (ATR % check) ===
-        atr = self._calculate_atr()
-        if atr:
-            atr_pct = (atr / current_price) * 100
-            if atr_pct < self.min_atr_pct:
-                logger.info(f"⏭️ Skipping signal - Low volatility (ATR: {atr_pct:.2f}% < {self.min_atr_pct}%)")
-                return None
+        # Bug fix: Reuse already calculated ATR instead of recalculating
+        atr_pct = (atr / current_price) * 100
+        if atr_pct < self.min_atr_pct:
+            logger.info(f"⏭️ Skipping signal - Low volatility (ATR: {atr_pct:.2f}% < {self.min_atr_pct}%)")
+            return None
         
         # === TIME-OF-DAY FILTER (High liquidity hours) ===
         current_hour = datetime.now(timezone.utc).hour
