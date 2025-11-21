@@ -101,7 +101,14 @@ class HLWebSocket:
                         {"type": "l2Book", "coin": symbol},
                         lambda data, s=symbol: self._handle_orderbook(s, data)
                     )
-                    logger.info(f"✅ Subscribed to {symbol} market data")
+                    
+                    # Subscribe to 1-minute candles (Phase 3 optimization)
+                    info_client.subscribe(
+                        {"type": "candle", "coin": symbol, "interval": "1m"},
+                        lambda data, s=symbol: self._handle_candle(s, data)
+                    )
+                    
+                    logger.info(f"✅ Subscribed to {symbol} market data + candles")
             except Exception as e:
                 logger.warning(f"⚠️ Could not subscribe to {symbol}: {e}")
     
@@ -195,6 +202,35 @@ class HLWebSocket:
                 callback(symbol, book)
             except Exception as e:
                 logger.error(f"Orderbook callback error: {e}")
+    
+    def _handle_candle(self, symbol: str, candle: Dict[str, Any]):
+        """
+        Handle real-time candle update (Phase 3 optimization)
+        Replaces polling get_candles() every 10 minutes
+        """
+        try:
+            # Store latest candle
+            timestamp = candle.get('t', 0)
+            self.candles[symbol][timestamp] = {
+                'time': timestamp,
+                'open': float(candle.get('o', 0)),
+                'high': float(candle.get('h', 0)),
+                'low': float(candle.get('l', 0)),
+                'close': float(candle.get('c', 0)),
+                'volume': float(candle.get('v', 0))
+            }
+            
+            logger.debug(f"📊 Candle update: {symbol} close=${candle.get('c')}")
+            
+            # Notify callbacks (for indicator recalculation)
+            for callback in self.on_candle_callbacks:
+                try:
+                    callback(symbol, candle)
+                except Exception as e:
+                    logger.error(f"Candle callback error: {e}")
+                    
+        except Exception as e:
+            logger.error(f"Error handling candle: {e}")
     
     def get_account_state(self) -> Dict[str, Any]:
         """

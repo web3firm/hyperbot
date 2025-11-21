@@ -159,6 +159,7 @@ class HyperAIBot:
         # Candle cache for strategies (reduces API calls by 98%)
         self._candles_cache: List[Dict[str, Any]] = []
         self._last_candle_fetch: Optional[datetime] = None
+        self._candle_update_pending = False  # Track if we need fresh candles
         
         # Error handler
         self.error_handler: Optional[ErrorHandler] = None
@@ -219,6 +220,10 @@ class HyperAIBot:
             
             # Link WebSocket to client for optimized get_account_state()
             self.client.websocket = self.websocket
+            
+            # Register candle callback for real-time updates (Phase 3)
+            self.websocket.on_candle_callbacks.append(self._on_new_candle)
+            logger.info("📊 Registered real-time candle callback")
             
             # Initialize Order Manager V2 (uses SDK bulk_orders)
             self.order_manager = HLOrderManagerV2(self.client)
@@ -350,6 +355,15 @@ class HyperAIBot:
             
         except Exception as e:
             logger.error(f"Error updating account state: {e}")
+    
+    def _on_new_candle(self, symbol: str, candle: Dict[str, Any]):
+        """
+        Callback for real-time candle updates (Phase 3)
+        Triggers indicator recalculation on new candle
+        """
+        if symbol == self.symbol:
+            self._candle_update_pending = True
+            logger.debug(f"🕯️ New candle received for {symbol}, indicators need refresh")
     
     async def _monitor_positions(self, account_state: Dict[str, Any]):
         """
@@ -546,21 +560,30 @@ class HyperAIBot:
                         await asyncio.sleep(1)
                         continue
                     
-                    # OPTIMIZED: Fetch candles once, then refresh every 10 minutes
-                    # This reduces API calls by 98% while keeping data fresh
+                    # PHASE 3 OPTIMIZATION: Use WebSocket candles + smart fallback
+                    # Only fetch via API on first run or if WebSocket fails
                     now = datetime.now(timezone.utc)
-                    should_fetch = (
-                        not self._candles_cache or 
-                        not self._last_candle_fetch or
-                        (now - self._last_candle_fetch).total_seconds() > 600  # 10 minutes
+                    need_initial_fetch = not self._candles_cache and not self._last_candle_fetch
+                    need_fallback_fetch = (
+                        self._last_candle_fetch and 
+                        (now - self._last_candle_fetch).total_seconds() > 900  # 15 min fallback
                     )
                     
-                    if should_fetch:
+                    if need_initial_fetch or need_fallback_fetch:
+                        # Initial fetch or fallback if WebSocket not providing candles
                         candles = self.client.get_candles(self.symbol, '1m', 150)
                         if candles:
                             self._candles_cache = candles
                             self._last_candle_fetch = now
-                            logger.debug(f"📊 Refreshed candles cache: {len(candles)} bars")
+                            logger.debug(f"📊 Fetched candles via API: {len(candles)} bars (fallback)")
+                    elif self._candle_update_pending:
+                        # WebSocket provided new candle - just refresh the cache
+                        candles = self.client.get_candles(self.symbol, '1m', 150)
+                        if candles:
+                            self._candles_cache = candles
+                            self._last_candle_fetch = now
+                            self._candle_update_pending = False
+                            logger.debug(f"📊 Updated candles on new bar: {len(candles)} bars")
                     
                     # Always use cached candles for strategies
                     if self._candles_cache:
