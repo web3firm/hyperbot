@@ -149,12 +149,27 @@ class TokenAnalyzer:
             elif macd:
                 reasons.append(f"❌ MACD bearish")
             
-            # Determine readiness
+            # Determine readiness and signal direction
             ready = score >= 5  # Need at least 5/8 points
+            
+            # Determine signal type based on conditions
+            signal = None
+            if ready:
+                # LONG signals (in uptrend)
+                if trend == 'UP' and rsi and rsi < 30:
+                    signal = 'LONG'
+                elif trend == 'UP' and rsi and 35 <= rsi <= 45:
+                    signal = 'LONG'
+                # SHORT signals (in downtrend)
+                elif trend == 'DOWN' and rsi and rsi > 70:
+                    signal = 'SHORT'
+                elif trend == 'DOWN' and rsi and 55 <= rsi <= 65:
+                    signal = 'SHORT'
             
             return {
                 'symbol': symbol,
                 'ready': ready,
+                'signal': signal,
                 'score': f"{float(score):.1f}/{max_score}",
                 'score_pct': f"{(float(score)/max_score)*100:.0f}%",
                 'price': current_price,
@@ -202,7 +217,8 @@ def print_results(results: List[Dict[str, Any]]):
     if ready_tokens:
         ready_tokens.sort(key=lambda x: float(x['score'].split('/')[0]), reverse=True)
         for r in ready_tokens:
-            print(f"\n✅ {r['symbol']}")
+            signal_emoji = "🟢 LONG" if r.get('signal') == 'LONG' else "🔴 SHORT" if r.get('signal') == 'SHORT' else "⚪ WAIT"
+            print(f"\n✅ {r['symbol']} → {signal_emoji}")
             print(f"   Score: {r['score']} ({r['score_pct']})")
             print(f"   Price: ${r['price']:.4f} | 24h: {r['change_24h']} | Trend: {r['trend']}")
             print(f"   ADX: {r['adx']:.1f} | RSI: {r['rsi']:.1f} | ATR: {r['atr_pct']:.2f}% | Vol: {r['volume_ratio']:.1f}x")
@@ -222,8 +238,9 @@ def print_results(results: List[Dict[str, Any]]):
             adx_str = f"{r['adx']:.1f}" if r['adx'] else 'N/A'
             rsi_str = f"{r['rsi']:.1f}" if r['rsi'] else 'N/A'
             atr_str = f"{r['atr_pct']:.2f}" if r['atr_pct'] else '0.00'
+            signal_hint = "🟢?" if r['trend'] == 'UP' else "🔴?" if r['trend'] == 'DOWN' else "⚪"
             
-            print(f"\n⏸️  {r['symbol']}")
+            print(f"\n⏸️  {r['symbol']} → {signal_hint}")
             print(f"   Score: {r['score']} ({r['score_pct']}) - Need 5/8 minimum")
             print(f"   Price: ${r['price']:.4f} | 24h: {r['change_24h']} | Trend: {r['trend']}")
             print(f"   ADX: {adx_str} | RSI: {rsi_str} | ATR: {atr_str}%")
@@ -252,7 +269,8 @@ def print_results(results: List[Dict[str, Any]]):
     # Recommendation
     if ready_tokens:
         best = ready_tokens[0]
-        print(f"💡 RECOMMENDATION: Trade {best['symbol']}")
+        signal_text = f"{best.get('signal', 'WAIT')}"
+        print(f"💡 RECOMMENDATION: {signal_text} {best['symbol']}")
         print(f"   Best score: {best['score']} ({best['score_pct']})")
         print(f"   To use: Update .env with SYMBOL={best['symbol']}")
     else:
