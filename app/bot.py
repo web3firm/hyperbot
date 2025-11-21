@@ -71,7 +71,7 @@ class SensitiveDataFilter(logging.Filter):
 # Import HyperLiquid integration
 from app.hl.hl_client import HyperLiquidClient
 from app.hl.hl_websocket import HLWebSocket
-from app.hl.hl_order_manager import HLOrderManager
+from app.hl.hl_order_manager_v2 import HLOrderManagerV2  # V2: Uses SDK bulk_orders
 
 # Import strategies
 from app.strategies.strategy_manager import StrategyManager
@@ -143,7 +143,7 @@ class HyperAIBot:
         # Exchange components
         self.client: Optional[HyperLiquidClient] = None
         self.websocket: Optional[HLWebSocket] = None
-        self.order_manager: Optional[HLOrderManager] = None
+        self.order_manager: Optional[HLOrderManagerV2] = None  # V2: SDK-optimized
         
         # Strategy Manager (runs all 4 strategies)
         self.strategy: Optional[StrategyManager] = None
@@ -210,12 +210,18 @@ class HyperAIBot:
                 testnet=testnet
             )
             
-            # Initialize websocket
-            self.websocket = HLWebSocket([self.symbol])
-            await self.websocket.start()
+            # Initialize WebSocket V2 with account updates (eliminates polling!)
+            self.websocket = HLWebSocket(
+                symbols=[self.symbol],
+                account_address=account_address  # Enable account subscriptions
+            )
+            await self.websocket.start(info_client=self.client.info)  # Pass SDK client for subscriptions
             
-            # Initialize order manager
-            self.order_manager = HLOrderManager(self.client)
+            # Link WebSocket to client for optimized get_account_state()
+            self.client.websocket = self.websocket
+            
+            # Initialize Order Manager V2 (uses SDK bulk_orders)
+            self.order_manager = HLOrderManagerV2(self.client)
             
             # Set leverage from MAX_LEVERAGE in .env
             leverage = int(os.getenv('MAX_LEVERAGE', '5'))

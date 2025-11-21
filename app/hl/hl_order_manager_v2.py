@@ -145,6 +145,23 @@ class HLOrderManagerV2:
         except Exception as e:
             logger.error(f"❌ Bulk cancel failed: {e}")
             return {'success': False, 'error': str(e)}
+    
+    async def place_market_order(
+        self,
+        symbol: str,
+        side: str,
+        size: float,
+        sl_price: Optional[float] = None,
+        tp_price: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """
+        Backward-compatible alias for place_market_order_with_stops
+        
+        Allows bot.py to work without changes
+        """
+        return await self.place_market_order_with_stops(
+            symbol, side, size, sl_price, tp_price
+        )
 
 
 # Example usage:
