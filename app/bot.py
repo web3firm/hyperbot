@@ -90,6 +90,9 @@ from app.utils.error_handler import ErrorHandler
 # Import database
 from app.database.db_manager import DatabaseManager
 
+# Phase 5: Shared indicator calculator
+from app.utils.indicator_calculator import IndicatorCalculator
+
 # Create logs directory if it doesn't exist
 Path('logs').mkdir(exist_ok=True)
 
@@ -160,6 +163,9 @@ class HyperAIBot:
         self._candles_cache: List[Dict[str, Any]] = []
         self._last_candle_fetch: Optional[datetime] = None
         self._candle_update_pending = False  # Track if we need fresh candles
+        
+        # Phase 5: Shared indicator calculator (eliminates duplicate calculations)
+        self.indicator_calc: Optional[IndicatorCalculator] = None
         
         # Error handler
         self.error_handler: Optional[ErrorHandler] = None
@@ -241,6 +247,10 @@ class HyperAIBot:
             # Initialize strategy manager with all 4 strategies
             logger.info(f"🎯 Initializing Strategy Manager for {self.symbol}")
             self.strategy = StrategyManager(self.symbol)
+            
+            # Phase 5: Initialize shared indicator calculator
+            self.indicator_calc = IndicatorCalculator()
+            logger.info("📊 Phase 5: Shared indicator calculator initialized")
             
             # Get initial account state
             await self.update_account_state()
@@ -362,7 +372,7 @@ class HyperAIBot:
     
     def _on_new_candle(self, symbol: str, candle: Dict[str, Any]):
         """
-        Callback for real-time candle updates (Phase 3 + Phase 4)
+        Callback for real-time candle updates (Phase 3 + Phase 4 + Phase 5)
         Triggers indicator recalculation on new candle
         """
         if symbol == self.symbol:
@@ -371,9 +381,12 @@ class HyperAIBot:
             # PHASE 4: Invalidate strategy indicator cache on new candle
             if hasattr(self.strategy, 'invalidate_indicator_cache'):
                 self.strategy.invalidate_indicator_cache()
-                logger.debug(f"🕯️ New candle for {symbol} - invalidated indicator cache")
-            else:
-                logger.debug(f"🕯️ New candle received for {symbol}, indicators need refresh")
+            
+            # PHASE 5: Invalidate shared indicator calculator cache
+            if self.indicator_calc:
+                self.indicator_calc.invalidate_cache()
+            
+            logger.debug(f"🕯️ New candle for {symbol} - invalidated all indicator caches")
     
     def _on_order_update(self, update: Dict[str, Any]):
         """
@@ -667,7 +680,20 @@ class HyperAIBot:
                         await asyncio.sleep(1)
                         continue
                     
-                    # Generate signal from strategy
+                    # PHASE 5: Calculate indicators once using shared calculator
+                    if self._candles_cache and self.indicator_calc:
+                        # Extract prices from candles
+                        prices_list = [Decimal(str(c['close'])) for c in self._candles_cache]
+                        volumes_list = [Decimal(str(c['volume'])) for c in self._candles_cache]
+                        
+                        # Calculate all indicators once
+                        shared_indicators = self.indicator_calc.calculate_all(prices_list, volumes_list)
+                        
+                        # Add to market_data
+                        market_data['indicators'] = shared_indicators
+                        logger.debug("📊 Phase 5: Using shared indicators")
+                    
+                    # Generate signal from strategy (now uses shared indicators)
                     signal = await self.strategy.generate_signal(market_data, account_state)
                     
                     if signal:

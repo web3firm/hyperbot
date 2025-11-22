@@ -97,6 +97,12 @@ class ScalpingStrategy2Pct:
         if len(self.recent_prices) < 50:
             return None
         
+        # PHASE 5: Use shared indicators if available (scalping uses simpler logic, but could use RSI/EMA)
+        # This strategy primarily uses price momentum, so shared indicators are optional
+        # But we log if they're available for future enhancements
+        if 'indicators' in market_data:
+            logger.debug("⚡ Shared indicators available (not used by scalping strategy)")
+        
         # === TREND FILTER: Only trade WITH the trend ===
         price_50_ago = self.recent_prices[0]  # Oldest price
         trend_pct = ((current_price - price_50_ago) / price_50_ago) * 100
