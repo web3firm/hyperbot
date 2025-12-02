@@ -36,7 +36,7 @@ class VolumeSpikeStrategy:
         self.leverage = int(os.getenv('MAX_LEVERAGE', '5'))
         self.tp_pct = Decimal('2.0')  # Aggressive on high conviction
         self.sl_pct = Decimal('1.0')
-        self.position_size_pct = Decimal(os.getenv('POSITION_SIZE_PCT', '68.0'))
+        self.position_size_pct = Decimal(os.getenv('POSITION_SIZE_PCT', '50'))
         
         # Volume parameters
         self.volume_multiplier = Decimal('2.0')  # 2x average

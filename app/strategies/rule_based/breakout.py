@@ -36,7 +36,7 @@ class BreakoutStrategy:
         self.leverage = int(os.getenv('MAX_LEVERAGE', '5'))
         self.tp_pct = Decimal('1.5')  # 1.5% beyond breakout
         self.sl_pct = Decimal('0.75')  # 0.75% inside range
-        self.position_size_pct = Decimal(os.getenv('POSITION_SIZE_PCT', '68.0'))
+        self.position_size_pct = Decimal(os.getenv('POSITION_SIZE_PCT', '50'))
         
         # Breakout period
         self.lookback_period = 20

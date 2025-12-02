@@ -102,7 +102,11 @@ class IndicatorCalculator:
         self._indicator_cache = indicators
         self._last_prices_hash = prices_hash
         
-        logger.debug(f"📊 Calculated indicators: RSI={rsi:.1f if rsi else 0}, EMA={ema_fast:.2f if ema_fast else 0}/{ema_slow:.2f if ema_slow else 0}, ADX={adx:.1f if adx else 0}")
+        rsi_val = float(rsi) if rsi else 0
+        ema_fast_val = float(ema_fast) if ema_fast else 0
+        ema_slow_val = float(ema_slow) if ema_slow else 0
+        adx_val = float(adx) if adx else 0
+        logger.debug(f"📊 Calculated indicators: RSI={rsi_val:.1f}, EMA={ema_fast_val:.2f}/{ema_slow_val:.2f}, ADX={adx_val:.1f}")
         
         return indicators
     

@@ -1,669 +1,244 @@
 """
-Hyperliquid Client - Official SDK Wrapper
-Provides normalized interface for HyperLiquid exchange operations
+HyperLiquid Client - Ultra-Lean SDK Passthrough
+Direct SDK methods with minimal wrapper overhead.
+Target: Maximum speed, minimum code.
 """
-
+import os
 import asyncio
-import logging
-from typing import Dict, Any, Optional, List
+from functools import lru_cache
+from typing import Optional, Dict, Any, List
 from decimal import Decimal
 from hyperliquid.exchange import Exchange
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
-import eth_account
+from eth_account import Account
+from app.utils.trading_logger import TradingLogger
 
-logger = logging.getLogger(__name__)
+logger = TradingLogger("hl_client")
 
 
 class HyperLiquidClient:
-    """
-    Wrapper for HyperLiquid SDK with normalized interface
-    """
+    """Ultra-lean SDK passthrough - exposes all SDK methods directly."""
     
-    def __init__(self, account_address: str, api_key: str, api_secret: str, 
-                 testnet: bool = False):
+    def __init__(self, account_address: str, api_key: str, api_secret: str, testnet: bool = False):
         """
-        Initialize HyperLiquid client
+        Initialize HyperLiquid client.
         
         Args:
-            account_address: Main trading account (0x...)
-            api_key: API wallet public key
-            api_secret: API wallet private key
-            testnet: Use testnet (default: False for mainnet)
+            account_address: Wallet address
+            api_key: API key (same as api_secret for HyperLiquid)
+            api_secret: Private key or API secret
+            testnet: Use testnet if True
         """
-        self.account_address = account_address
-        self.api_key = api_key
-        self.testnet = testnet
+        self.wallet = Account.from_key(api_secret)
+        self.address = account_address or self.wallet.address
         
-        # Initialize SDK components
-        base_url = constants.TESTNET_API_URL if testnet else constants.MAINNET_API_URL
-        
-        # Create wallet from private key
-        self.wallet = eth_account.Account.from_key(api_secret)
-        
-        # Initialize Exchange for trading
-        self.exchange = Exchange(
-            self.wallet,
-            base_url,
-            account_address=account_address
-        )
-        
-        # Initialize Info for market data (enable WebSocket for subscriptions)
-        self.info = Info(base_url, skip_ws=False)
-        
-        # Cache asset metadata for decimal precision
-        self._asset_metadata = {}
-        self._load_asset_metadata()
-        
-        logger.info(f"🔗 HyperLiquid client initialized")
-        logger.info(f"   Account: {account_address}")
-        logger.info(f"   API Wallet: {self.wallet.address}")
-        logger.info(f"   Network: {'Testnet' if testnet else 'Mainnet'}")
-    
-    def _load_asset_metadata(self):
-        """Load asset metadata from HyperLiquid API"""
-        try:
-            meta = self.info.meta()
-            universe = meta.get('universe', [])
-            for asset in universe:
-                name = asset.get('name')
-                self._asset_metadata[name] = {
-                    'szDecimals': asset.get('szDecimals', 2),
-                    'maxLeverage': asset.get('maxLeverage', 50)
-                }
-            logger.info(f"📊 Loaded metadata for {len(self._asset_metadata)} assets")
-        except Exception as e:
-            logger.warning(f"Failed to load asset metadata: {e}. Using defaults.")
-    
-    def get_size_decimals(self, symbol: str) -> int:
-        """Get the number of decimal places for position size for a given symbol"""
-        return self._asset_metadata.get(symbol, {}).get('szDecimals', 2)
-    
-    def get_price_decimals(self, price: float) -> int:
-        """Get appropriate decimal places for price based on price magnitude"""
-        if price >= 100:
-            return 2
-        elif price >= 10:
-            return 3
+        # Get RPC URL from env or use SDK defaults
+        if testnet:
+            base_url = os.getenv('TESTNET_RPC_URL', constants.TESTNET_API_URL)
         else:
-            return 4
-    
-    async def get_account_state(self) -> Dict[str, Any]:
-        """
-        Get account balance and positions
-        OPTIMIZED: Uses WebSocket cache if available (instant, no API call!)
+            base_url = os.getenv('MAINNET_RPC_URL', constants.MAINNET_API_URL)
         
-        Returns:
-            Account state with balance, positions, margin
-        """
-        # OPTIMIZATION: Use WebSocket data if available
-        if hasattr(self, 'websocket') and self.websocket and self.websocket.account_address:
-            ws_state = self.websocket.get_account_state()
-            if ws_state['account_value'] > 0:  # Valid data in cache
-                logger.debug("📊 Account from WebSocket (0ms, no API call)")
-                return ws_state
+        # Direct SDK instances - use these for all operations
+        self.exchange = Exchange(self.wallet, base_url)
+        self.info = Info(base_url, skip_ws=True)
         
-        # Fallback to API polling
-        try:
-            user_state = self.info.user_state(self.account_address)
-            
-            # Extract balance info
-            margin_summary = user_state.get('marginSummary', {})
-            account_value = Decimal(str(margin_summary.get('accountValue', '0')))
-            total_margin_used = Decimal(str(margin_summary.get('totalMarginUsed', '0')))
-            total_ntl_pos = Decimal(str(margin_summary.get('totalNtlPos', '0')))
-            total_raw_usd = Decimal(str(margin_summary.get('totalRawUsd', '0')))
-            
-            # Extract positions
-            positions = []
-            asset_positions = user_state.get('assetPositions', [])
-            
-            for pos in asset_positions:
-                position_data = pos.get('position', {})
-                
-                # Skip empty positions
-                if not position_data.get('szi') or float(position_data.get('szi', 0)) == 0:
-                    continue
-                
-                coin = position_data.get('coin', '')
-                size = Decimal(str(position_data.get('szi', '0')))
-                entry_px = Decimal(str(position_data.get('entryPx', '0')))
-                
-                # Get position value and leverage
-                position_value = abs(size * entry_px)
-                leverage_data = position_data.get('leverage', {})
-                if isinstance(leverage_data, dict):
-                    leverage = Decimal(str(leverage_data.get('value', '1')))
-                else:
-                    leverage = Decimal(str(leverage_data))
-                
-                # Calculate unrealized PnL
-                unrealized_pnl = Decimal(str(position_data.get('unrealizedPnl', '0')))
-                
-                positions.append({
-                    'symbol': coin,
-                    'size': float(size),
-                    'side': 'long' if size > 0 else 'short',
-                    'entry_price': float(entry_px),
-                    'position_value': float(position_value),
-                    'leverage': float(leverage),
-                    'unrealized_pnl': float(unrealized_pnl),
-                    'liquidation_px': position_data.get('liquidationPx'),
-                    'margin_used': position_data.get('marginUsed', '0')
-                })
-            
-            return {
-                'account_value': float(account_value),
-                'balance': float(total_raw_usd),
-                'equity': float(account_value),
-                'margin_used': float(total_margin_used),
-                'margin_available': float(account_value - total_margin_used),
-                'total_position_value': float(total_ntl_pos),
-                'positions': positions,
-                'withdrawable': margin_summary.get('withdrawable', '0')
-            }
-            
-        except Exception as e:
-            logger.error(f"Error getting account state: {e}")
-            return {
-                'account_value': 0,
-                'balance': 0,
-                'equity': 0,
-                'margin_used': 0,
-                'margin_available': 0,
-                'total_position_value': 0,
-                'positions': [],
-                'error': str(e)
-            }
+        # WebSocket reference (set by bot.py after initialization)
+        self.websocket = None
+        
+        self._meta_cache: Optional[Dict] = None
+        self._loop = asyncio.get_event_loop()
+        
+        logger.info(f"HyperLiquidClient initialized for {self.address[:10]}...")
     
-    def get_candles(self, symbol: str, interval: str = '1h', limit: int = 100) -> List[Dict[str, Any]]:
+    # ==================== METADATA ====================
+    @lru_cache(maxsize=1)
+    def get_meta(self) -> Dict:
+        """Cached perpetuals metadata."""
+        if not self._meta_cache:
+            self._meta_cache = self.info.meta()
+        return self._meta_cache
+    
+    def get_asset_id(self, symbol: str) -> int:
+        """Get asset index from symbol."""
+        meta = self.get_meta()
+        for i, asset in enumerate(meta.get("universe", [])):
+            if asset["name"] == symbol:
+                return i
+        raise ValueError(f"Unknown symbol: {symbol}")
+    
+    def get_sz_decimals(self, symbol: str) -> int:
+        """Get size decimals for proper rounding."""
+        meta = self.get_meta()
+        for asset in meta.get("universe", []):
+            if asset["name"] == symbol:
+                return asset.get("szDecimals", 3)
+        return 3
+    
+    # ==================== DIRECT SDK PASSTHROUGH ====================
+    # Exchange methods - use exchange.method() directly for:
+    #   order(), bulk_orders(), market_open(), market_close()
+    #   modify_order(), bulk_modify_orders_new()
+    #   cancel(), cancel_by_cloid(), bulk_cancel(), bulk_cancel_by_cloid()
+    #   schedule_cancel(), update_leverage(), update_isolated_margin()
+    #   approve_agent(), set_referrer(), usd_transfer(), spot_transfer()
+    
+    # Info methods - use info.method() directly for:
+    #   user_state(), spot_user_state(), open_orders(), frontend_open_orders()
+    #   all_mids(), l2_snapshot(), candles_snapshot(), meta(), spot_meta()
+    #   user_fills(), user_fills_by_time(), user_funding_history()
+    #   query_order_by_oid(), query_order_by_cloid()
+    #   user_fees(), user_rate_limit(), historical_orders()
+    
+    # ==================== CONVENIENCE WRAPPERS ====================
+    def get_position(self, symbol: str) -> Optional[Dict]:
+        """Get current position for symbol."""
+        state = self.info.user_state(self.address)
+        for pos in state.get("assetPositions", []):
+            if pos["position"]["coin"] == symbol:
+                return pos["position"]
+        return None
+    
+    def get_all_positions(self) -> List[Dict]:
+        """Get all open positions."""
+        state = self.info.user_state(self.address)
+        return [p["position"] for p in state.get("assetPositions", []) 
+                if float(p["position"].get("szi", 0)) != 0]
+    
+    def get_balance(self) -> float:
+        """Get available balance."""
+        state = self.info.user_state(self.address)
+        return float(state.get("withdrawable", 0))
+    
+    def get_equity(self) -> float:
+        """Get account equity."""
+        state = self.info.user_state(self.address)
+        margin = state.get("marginSummary", {})
+        return float(margin.get("accountValue", 0))
+    
+    def get_mid_price(self, symbol: str) -> float:
+        """Get current mid price."""
+        mids = self.info.all_mids()
+        return float(mids.get(symbol, 0))
+    
+    def get_open_orders(self, symbol: Optional[str] = None) -> List[Dict]:
+        """Get open orders, optionally filtered by symbol."""
+        orders = self.info.open_orders(self.address)
+        if symbol:
+            return [o for o in orders if o.get("coin") == symbol]
+        return orders
+    
+    def get_candles(self, symbol: str, interval: str = "1m", limit: int = 100) -> List[Dict]:
         """
-        Get historical candle data for symbol
+        Get historical candles from API.
         
         Args:
-            symbol: Trading symbol (e.g., 'HYPE', 'SOL')
-            interval: Candle interval ('1m', '5m', '15m', '1h', '4h', '1d')
+            symbol: Trading pair symbol
+            interval: Candle interval (1m, 5m, 15m, 1h, 4h, 1d)
             limit: Number of candles to fetch
-            
+        
         Returns:
-            List of candle dicts with keys: time, open, high, low, close, volume
+            List of candle dicts with open, high, low, close, volume, time
         """
+        import time as time_module
         try:
-            import time
-            
             # Calculate time range based on interval and limit
-            interval_ms = {
+            now_ms = int(time_module.time() * 1000)
+            
+            # Parse interval to get milliseconds per candle
+            interval_map = {
                 '1m': 60 * 1000,
                 '5m': 5 * 60 * 1000,
                 '15m': 15 * 60 * 1000,
+                '30m': 30 * 60 * 1000,
                 '1h': 60 * 60 * 1000,
                 '4h': 4 * 60 * 60 * 1000,
-                '1d': 24 * 60 * 60 * 1000
-            }.get(interval, 60 * 60 * 1000)
+                '1d': 24 * 60 * 60 * 1000,
+            }
+            interval_ms = interval_map.get(interval, 60 * 1000)
+            start_time = now_ms - (limit * interval_ms)
             
-            # HyperLiquid API requires startTime and endTime in milliseconds
-            end_time = int(time.time() * 1000)  # Current time in ms
-            start_time = end_time - (interval_ms * limit)  # Go back limit periods
+            # SDK candles_snapshot requires startTime and endTime
+            raw_candles = self.info.candles_snapshot(symbol, interval, start_time, now_ms)
             
-            # Fetch candles
-            candles_data = self.info.candles_snapshot(symbol, interval, start_time, end_time)
-            
-            if not candles_data:
-                logger.warning(f"No candle data received for {symbol}")
-                return []
-            
-            # Convert to standard format
+            # Transform to standard format
             candles = []
-            for candle in candles_data:
-                candles.append({
-                    'time': int(candle['t']),  # timestamp in ms
-                    'open': float(candle['o']),
-                    'high': float(candle['h']),
-                    'low': float(candle['l']),
-                    'close': float(candle['c']),
-                    'volume': float(candle['v'])
-                })
-            
-            logger.debug(f"📊 Fetched {len(candles)} candles for {symbol}")
+            for c in raw_candles:
+                if isinstance(c, dict):
+                    candles.append({
+                        'open': float(c.get('o', c.get('open', 0))),
+                        'high': float(c.get('h', c.get('high', 0))),
+                        'low': float(c.get('l', c.get('low', 0))),
+                        'close': float(c.get('c', c.get('close', 0))),
+                        'volume': float(c.get('v', c.get('volume', 0))),
+                        'time': c.get('t', c.get('time', 0))
+                    })
+                elif isinstance(c, (list, tuple)) and len(c) >= 5:
+                    # Handle array format [time, open, high, low, close, volume]
+                    candles.append({
+                        'time': c[0],
+                        'open': float(c[1]),
+                        'high': float(c[2]),
+                        'low': float(c[3]),
+                        'close': float(c[4]),
+                        'volume': float(c[5]) if len(c) > 5 else 0
+                    })
             return candles
-            
         except Exception as e:
-            logger.error(f"Error fetching candles for {symbol}: {e}")
+            logger.error(f"Failed to fetch candles for {symbol}: {e}")
             return []
     
-    async def get_market_price(self, symbol: str) -> Optional[Decimal]:
+    # ==================== ASYNC WRAPPERS ====================
+    async def async_user_state(self) -> Dict:
+        return await self._loop.run_in_executor(None, self.info.user_state, self.address)
+    
+    async def async_all_mids(self) -> Dict:
+        return await self._loop.run_in_executor(None, self.info.all_mids)
+    
+    async def async_open_orders(self) -> List[Dict]:
+        return await self._loop.run_in_executor(None, self.info.open_orders, self.address)
+    
+    async def async_l2_snapshot(self, symbol: str) -> Dict:
+        return await self._loop.run_in_executor(None, self.info.l2_snapshot, symbol)
+    
+    async def get_account_state(self) -> Dict[str, Any]:
         """
-        Get current market price for symbol
+        Get comprehensive account state for bot.py compatibility.
+        Returns dict with account_value, margin_used, positions, etc.
+        """
+        # Try WebSocket cache first for speed
+        if self.websocket and hasattr(self.websocket, 'get_cached_state'):
+            cached = self.websocket.get_cached_state()
+            if cached:
+                return cached
         
-        Args:
-            symbol: Trading symbol (e.g., 'SOL')
-            
-        Returns:
-            Current price or None
-        """
-        try:
-            all_mids = self.info.all_mids()
-            price_str = all_mids.get(symbol)
-            
-            if price_str:
-                return Decimal(str(price_str))
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"Error getting market price for {symbol}: {e}")
-            return None
-    
-    async def place_order(self, symbol: str, side: str, size: Decimal, 
-                         order_type: str = 'market', price: Optional[Decimal] = None,
-                         reduce_only: bool = False, sl_price: Optional[Decimal] = None,
-                         tp_price: Optional[Decimal] = None) -> Dict[str, Any]:
-        """
-        Place order on HyperLiquid
+        # Fallback to API
+        state = await self._loop.run_in_executor(None, self.info.user_state, self.address)
+        margin = state.get("marginSummary", {})
         
-        Args:
-            symbol: Trading symbol
-            side: 'buy' or 'sell'
-            size: Order size
-            order_type: 'market' or 'limit'
-            price: Limit price (required for limit orders)
-            reduce_only: Reduce only flag
-            sl_price: Stop loss price (for OCO)
-            tp_price: Take profit price (for OCO)
-            
-        Returns:
-            Order result
-        """
-        try:
-            # Determine if it's a buy or sell
-            is_buy = side.lower() == 'buy'
-            
-            # Format size with proper sign
-            size_float = float(size)
-            if not is_buy:
-                size_float = -abs(size_float)
-            else:
-                size_float = abs(size_float)
-            
-            # Round size to 2 decimals for SOL
-            size_float = round(size_float, 2)
-            
-            # Prepare order parameters
-            if order_type == 'market':
-                # Market order
-                order_result = self.exchange.market_open(
-                    symbol,
-                    is_buy,
-                    abs(size_float),
-                    None  # No slippage (will use default)
-                )
-            else:
-                # Limit order
-                if price is None:
-                    raise ValueError("Price required for limit order")
-                
-                # Round price to 2 decimals for prices > $100
-                price_float = float(price)
-                if price_float >= 100:
-                    price_float = round(price_float, 2)
-                elif price_float >= 10:
-                    price_float = round(price_float, 3)
-                else:
-                    price_float = round(price_float, 4)
-                
-                order_result = self.exchange.order(
-                    symbol,
-                    is_buy,
-                    abs(size_float),
-                    price_float,
-                    {'limit': {'tif': 'Gtc'}},
-                    reduce_only=reduce_only
-                )
-            
-            # Check if order was successful
-            if order_result and 'status' in order_result:
-                if order_result['status'] == 'ok':
-                    # Check for errors in response
-                    response = order_result.get('response', {})
-                    if isinstance(response, dict):
-                        data = response.get('data', {})
-                        if isinstance(data, dict):
-                            statuses = data.get('statuses', [])
-                            if statuses and isinstance(statuses[0], dict):
-                                if 'error' in statuses[0]:
-                                    logger.error(f"Order error: {statuses[0]['error']}")
-                                    return {
-                                        'success': False,
-                                        'error': statuses[0]['error'],
-                                        'raw': order_result
-                                    }
-                    
-                    logger.info(f"✅ Order placed: {side} {size_float} {symbol}")
-                    return {
-                        'success': True,
-                        'order_id': str(response.get('data', {}).get('statuses', [{}])[0].get('resting', {}).get('oid', 'unknown')),
-                        'symbol': symbol,
-                        'side': side,
-                        'size': abs(size_float),
-                        'type': order_type,
-                        'price': price_float if order_type == 'limit' else None,
-                        'raw': order_result
-                    }
-                else:
-                    logger.error(f"Order failed: {order_result}")
-                    return {
-                        'success': False,
-                        'error': order_result.get('response', 'Unknown error'),
-                        'raw': order_result
-                    }
-            
-            logger.error(f"Invalid order response: {order_result}")
-            return {
-                'success': False,
-                'error': 'Invalid response format',
-                'raw': order_result
-            }
-            
-        except Exception as e:
-            logger.error(f"Error placing order: {e}", exc_info=True)
-            return {
-                'success': False,
-                'error': str(e)
-            }
-    
-    async def place_stop_market_order(self, symbol: str, side: str, size: Decimal,
-                                     trigger_price: Decimal, reduce_only: bool = False) -> Dict[str, Any]:
-        """
-        Place stop-market order on HyperLiquid
-        This triggers a market order when price hits the trigger level
+        # Parse positions
+        positions = []
+        for pos in state.get("assetPositions", []):
+            p = pos.get("position", {})
+            size = float(p.get("szi", 0))
+            if size != 0:
+                positions.append({
+                    'symbol': p.get("coin"),
+                    'size': size,
+                    'entry_price': float(p.get("entryPx", 0)),
+                    'mark_price': float(p.get("positionValue", 0)) / abs(size) if size else 0,
+                    'unrealized_pnl': float(p.get("unrealizedPnl", 0)),
+                    'leverage': float(p.get("leverage", {}).get("value", 1)),
+                })
         
-        Args:
-            symbol: Trading symbol
-            side: 'buy' or 'sell'
-            size: Order size
-            trigger_price: Price at which to trigger the market order
-            reduce_only: Reduce only flag
-            
-        Returns:
-            Order result
-        """
-        try:
-            # Determine if it's a buy or sell
-            is_buy = side.lower() == 'buy'
-            
-            # Format size with proper sign
-            size_float = float(size)
-            if not is_buy:
-                size_float = -abs(size_float)
-            else:
-                size_float = abs(size_float)
-            
-            # Round size to 2 decimals
-            size_float = round(size_float, 2)
-            
-            # Round trigger price
-            trigger_float = float(trigger_price)
-            if trigger_float >= 100:
-                trigger_float = round(trigger_float, 2)
-            elif trigger_float >= 10:
-                trigger_float = round(trigger_float, 3)
-            else:
-                trigger_float = round(trigger_float, 4)
-            
-            # Place stop-market order (trigger order that executes as market)
-            order_result = self.exchange.order(
-                symbol,
-                is_buy,
-                abs(size_float),
-                trigger_float,
-                {
-                    'trigger': {
-                        'triggerPx': trigger_float,
-                        'isMarket': True,  # Execute as market order when triggered
-                        'tpsl': 'sl'  # Mark as stop-loss
-                    }
-                },
-                reduce_only=reduce_only
-            )
-            
-            # Check if order was successful
-            if order_result and 'status' in order_result:
-                if order_result['status'] == 'ok':
-                    # Check for errors in response
-                    response = order_result.get('response', {})
-                    if isinstance(response, dict):
-                        data = response.get('data', {})
-                        if isinstance(data, dict):
-                            statuses = data.get('statuses', [])
-                            if statuses and isinstance(statuses[0], dict):
-                                if 'error' in statuses[0]:
-                                    logger.error(f"Stop order error: {statuses[0]['error']}")
-                                    return {
-                                        'success': False,
-                                        'error': statuses[0]['error'],
-                                        'raw': order_result
-                                    }
-                    
-                    logger.info(f"✅ Stop-market order placed: {side} {size_float} {symbol} @ trigger {trigger_float}")
-                    return {
-                        'success': True,
-                        'order_id': str(response.get('data', {}).get('statuses', [{}])[0].get('resting', {}).get('oid', 'unknown')),
-                        'symbol': symbol,
-                        'side': side,
-                        'size': abs(size_float),
-                        'type': 'stop-market',
-                        'trigger_price': trigger_float,
-                        'raw': order_result
-                    }
-                else:
-                    logger.error(f"Stop order failed: {order_result}")
-                    return {
-                        'success': False,
-                        'error': order_result.get('response', 'Unknown error'),
-                        'raw': order_result
-                    }
-            
-            logger.error(f"Invalid stop order result: {order_result}")
-            return {
-                'success': False,
-                'error': 'Invalid order result',
-                'raw': order_result
-            }
-                
-        except Exception as e:
-            logger.error(f"Error placing stop order: {e}", exc_info=True)
-            return {
-                'success': False,
-                'error': str(e)
-            }
-    
-    async def place_take_profit_order(self, symbol: str, side: str, size: Decimal,
-                                      trigger_price: Decimal, reduce_only: bool = False) -> Dict[str, Any]:
-        """
-        Place take-profit order on HyperLiquid
-        This is a limit order marked as TP type
-        
-        Args:
-            symbol: Trading symbol
-            side: 'buy' or 'sell'
-            size: Order size
-            trigger_price: Price at which to take profit
-            reduce_only: Reduce only flag
-            
-        Returns:
-            Order result
-        """
-        try:
-            # Determine if it's a buy or sell
-            is_buy = side.lower() == 'buy'
-            
-            # Format size with proper sign
-            size_float = float(size)
-            if not is_buy:
-                size_float = -abs(size_float)
-            else:
-                size_float = abs(size_float)
-            
-            # Round size to 2 decimals
-            size_float = round(size_float, 2)
-            
-            # Round trigger price
-            trigger_float = float(trigger_price)
-            if trigger_float >= 100:
-                trigger_float = round(trigger_float, 2)
-            elif trigger_float >= 10:
-                trigger_float = round(trigger_float, 3)
-            else:
-                trigger_float = round(trigger_float, 4)
-            
-            # Place TP order (Take Market - executes at market price when trigger hit)
-            # For Take Market: pass trigger_float as limit_px, but isMarket=True executes at market
-            order_result = self.exchange.order(
-                symbol,
-                is_buy,
-                abs(size_float),
-                trigger_float,  # limit_px = trigger price (required by SDK)
-                {
-                    'trigger': {
-                        'triggerPx': trigger_float,
-                        'isMarket': True,  # ✅ Execute as MARKET order when triggered
-                        'tpsl': 'tp'  # Mark as take-profit
-                    }
-                },
-                reduce_only=reduce_only
-            )
-            
-            # Log raw response for debugging
-            logger.debug(f"TP order raw response: {order_result}")
-            
-            # Check if order was successful
-            if order_result and 'status' in order_result:
-                if order_result['status'] == 'ok':
-                    # Check for errors in response
-                    response = order_result.get('response', {})
-                    if isinstance(response, dict):
-                        data = response.get('data', {})
-                        if isinstance(data, dict):
-                            statuses = data.get('statuses', [])
-                            if statuses and isinstance(statuses[0], dict):
-                                if 'error' in statuses[0]:
-                                    logger.error(f"TP order error: {statuses[0]['error']}")
-                                    return {
-                                        'success': False,
-                                        'error': statuses[0]['error'],
-                                        'raw': order_result
-                                    }
-                    
-                    logger.info(f"✅ Take-profit order placed: {side} {size_float} {symbol} @ {trigger_float}")
-                    return {
-                        'success': True,
-                        'order_id': str(response.get('data', {}).get('statuses', [{}])[0].get('resting', {}).get('oid', 'unknown')),
-                        'symbol': symbol,
-                        'side': side,
-                        'size': abs(size_float),
-                        'type': 'take-profit',
-                        'trigger_price': trigger_float,
-                        'raw': order_result
-                    }
-                else:
-                    logger.error(f"TP order failed: {order_result}")
-                    return {
-                        'success': False,
-                        'error': order_result.get('response', 'Unknown error'),
-                        'raw': order_result
-                    }
-            
-            logger.error(f"Invalid TP order result: {order_result}")
-            return {
-                'success': False,
-                'error': 'Invalid order result',
-                'raw': order_result
-            }
-                
-        except Exception as e:
-            logger.error(f"Error placing TP order: {e}", exc_info=True)
-            return {
-                'success': False,
-                'error': str(e)
-            }
-    
-    async def cancel_order(self, symbol: str, order_id: str) -> bool:
-        """Cancel an order"""
-        try:
-            result = self.exchange.cancel(symbol, int(order_id))
-            return result.get('status') == 'ok'
-        except Exception as e:
-            logger.error(f"Error canceling order: {e}")
-            return False
-    
-    async def set_leverage(self, symbol: str, leverage: int) -> bool:
-        """
-        Set leverage for a symbol in cross-margin mode
-        
-        Args:
-            symbol: Trading symbol
-            leverage: Leverage value (1-50)
-            
-        Returns:
-            True if successful
-        """
-        try:
-            # Use is_cross=True for cross-margin mode (default on HyperLiquid)
-            result = self.exchange.update_leverage(leverage, symbol, is_cross=True)
-            success = result.get('status') == 'ok'
-            
-            if success:
-                logger.info(f"✅ Leverage set to {leverage}x for {symbol} (cross-margin)")
-            else:
-                logger.error(f"❌ Failed to set leverage: {result}")
-            
-            return success
-            
-        except Exception as e:
-            logger.error(f"❌ Error setting leverage: {e}")
-            return False
-    
-    async def close_position(self, symbol: str) -> Dict[str, Any]:
-        """
-        Close entire position for symbol
-        
-        Args:
-            symbol: Trading symbol
-            
-        Returns:
-            Close result
-        """
-        try:
-            # Get current position
-            account_state = await self.get_account_state()
-            position = next((p for p in account_state['positions'] if p['symbol'] == symbol), None)
-            
-            if not position:
-                return {'success': False, 'error': 'No position found'}
-            
-            # Determine close side (opposite of position)
-            close_side = 'sell' if position['side'] == 'long' else 'buy'
-            close_size = abs(Decimal(str(position['size'])))
-            
-            # Place market order to close
-            result = await self.place_order(
-                symbol,
-                close_side,
-                close_size,
-                order_type='market',
-                reduce_only=True
-            )
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error closing position: {e}")
-            return {'success': False, 'error': str(e)}
-    
-    def get_meta_info(self) -> Dict[str, Any]:
-        """Get exchange metadata (symbols, tick sizes, etc.)"""
-        try:
-            return self.info.meta()
-        except Exception as e:
-            logger.error(f"Error getting meta info: {e}")
-            return {}
+        return {
+            'account_value': float(margin.get("accountValue", 0)),
+            'margin_used': float(margin.get("totalMarginUsed", 0)),
+            'available_margin': float(state.get("withdrawable", 0)),
+            'positions': positions,
+        }
+
+
+def create_client(account_address: str, api_key: str, api_secret: str, testnet: bool = False) -> 'HyperLiquidClient':
+    """Create HyperLiquidClient instance."""
+    return HyperLiquidClient(account_address, api_key, api_secret, testnet)

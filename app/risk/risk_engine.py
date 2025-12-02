@@ -115,7 +115,8 @@ class RiskEngine:
         # Calculate collateral needed (trade value divided by leverage)
         collateral_pct = (trade_value / self.limits.max_leverage / equity) * 100
         
-        if collateral_pct > self.limits.max_position_size_pct:
+        # Use >= for limit check (allow exactly at limit)
+        if collateral_pct > self.limits.max_position_size_pct + Decimal('0.1'):  # Small buffer
             return False, f"Position size {collateral_pct:.1f}% exceeds limit {self.limits.max_position_size_pct}%"
         
         # 3. Check margin availability

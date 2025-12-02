@@ -65,6 +65,8 @@ class TelegramBot:
     - Emergency start/stop buttons
     - Account status and margin
     - Performance analytics
+    - Rate limiting and spam protection
+    - Scheduled status updates
     """
     
     def __init__(self, bot_instance, config: Dict[str, Any] = None):
@@ -93,6 +95,19 @@ class TelegramBot:
         self.daily_pnl = Decimal('0')
         self.session_start = datetime.now(timezone.utc)
         
+        # Rate limiting (prevent spam)
+        self._last_message_time: Dict[str, datetime] = {}
+        self._message_cooldown = timedelta(seconds=2)  # Min 2s between same type messages
+        
+        # Notification settings (configurable)
+        self.notify_signals = os.getenv('TG_NOTIFY_SIGNALS', 'true').lower() == 'true'
+        self.notify_fills = os.getenv('TG_NOTIFY_FILLS', 'true').lower() == 'true'
+        self.notify_pnl_warnings = os.getenv('TG_NOTIFY_PNL_WARNINGS', 'true').lower() == 'true'
+        self.status_update_interval = int(os.getenv('TG_STATUS_INTERVAL', '3600'))  # Default 1 hour
+        
+        # Scheduled tasks
+        self._status_task = None
+        
         logger.info("📱 Telegram Bot initialized")
         logger.info(f"   Token: {mask_token(self.token)}")
         logger.info(f"   Chat ID: {self.chat_id}")
@@ -103,10 +118,17 @@ class TelegramBot:
             return
         
         try:
-            # Build application
-            self.application = Application.builder().token(self.token).build()
+            # Build application with custom defaults
+            self.application = (
+                Application.builder()
+                .token(self.token)
+                .read_timeout(30)
+                .write_timeout(30)
+                .connect_timeout(30)
+                .build()
+            )
             
-            # Register handlers
+            # Register handlers - Core commands
             self.application.add_handler(CommandHandler("start", self._cmd_start))
             self.application.add_handler(CommandHandler("status", self._cmd_status))
             self.application.add_handler(CommandHandler("positions", self._cmd_positions))
@@ -118,21 +140,35 @@ class TelegramBot:
             self.application.add_handler(CommandHandler("analytics", self._cmd_analytics))
             self.application.add_handler(CommandHandler("dbstats", self._cmd_dbstats))
             self.application.add_handler(CommandHandler("help", self._cmd_help))
+            
+            # New enhanced commands
+            self.application.add_handler(CommandHandler("market", self._cmd_market))
+            self.application.add_handler(CommandHandler("close", self._cmd_close))
+            self.application.add_handler(CommandHandler("closeall", self._cmd_closeall))
+            self.application.add_handler(CommandHandler("balance", self._cmd_balance))
+            self.application.add_handler(CommandHandler("regime", self._cmd_regime))
+            self.application.add_handler(CommandHandler("session", self._cmd_session))
+            
+            # Callback handler for inline buttons
             self.application.add_handler(CallbackQueryHandler(self._handle_callback))
             
             # Start bot
             await self.application.initialize()
             await self.application.start()
-            await self.application.updater.start_polling()
+            await self.application.updater.start_polling(drop_pending_updates=True)
             
             self.is_running = True
+            
+            # Start scheduled status updates
+            if self.status_update_interval > 0:
+                self._status_task = asyncio.create_task(self._scheduled_status_updates())
             
             # Send startup message
             await self.send_message(
                 "🚀 *ENTERPRISE BOT STARTED*\n\n"
                 f"✅ Connected to trading system\n"
                 f"💰 Account: ${self.bot.account_value:.2f}\n"
-                f"🎯 Strategies: Swing (70%) + Scalping\n"
+                f"🎯 Strategies: World-Class Swing + Scalping\n"
                 f"⏰ Started: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
                 "Use /help for commands"
             )
@@ -145,22 +181,51 @@ class TelegramBot:
             raise Exception(f"Failed to start Telegram bot: {error_msg}") from None
     
     async def stop(self):
-        """Stop the Telegram bot"""
-        if not self.is_running or not self.application:
+        """Stop the Telegram bot gracefully"""
+        if not self.is_running:
+            logger.info("Telegram bot already stopped")
             return
         
         try:
-            await self.send_message("🛑 *BOT STOPPING*\n\nTelegram bot shutting down...")
+            # Cancel scheduled tasks
+            if self._status_task and not self._status_task.done():
+                self._status_task.cancel()
+                try:
+                    await self._status_task
+                except asyncio.CancelledError:
+                    pass
             
-            await self.application.updater.stop()
-            await self.application.stop()
-            await self.application.shutdown()
+            # Try to send shutdown message (may fail if already disconnected)
+            try:
+                await self.send_message("🛑 *BOT STOPPING*\n\nTelegram bot shutting down...")
+            except Exception:
+                pass  # Ignore send errors during shutdown
+            
+            # Stop polling first
+            if self.application and self.application.updater:
+                try:
+                    await self.application.updater.stop()
+                except Exception as e:
+                    logger.debug(f"Error stopping updater: {e}")
+            
+            # Stop and shutdown application
+            if self.application:
+                try:
+                    await self.application.stop()
+                except Exception as e:
+                    logger.debug(f"Error stopping application: {e}")
+                    
+                try:
+                    await self.application.shutdown()
+                except Exception as e:
+                    logger.debug(f"Error shutting down application: {e}")
             
             self.is_running = False
             logger.info("✅ Telegram bot stopped")
             
         except Exception as e:
             logger.error(f"Error stopping Telegram bot: {e}")
+            self.is_running = False
     
     async def send_message(self, text: str, reply_markup=None, parse_mode='Markdown'):
         """Send message to Telegram chat"""
@@ -585,33 +650,36 @@ class TelegramBot:
         try:
             message = (
                 "❓ <b>HELP - AVAILABLE COMMANDS</b>\n\n"
-                "<b>Monitoring:</b>\n"
+                "<b>📊 Monitoring:</b>\n"
                 "/status - Bot and account status\n"
                 "/positions - Active open positions\n"
                 "/trades - Last 10 completed trades\n"
                 "/pnl - Daily and weekly PnL\n"
+                "/balance - Quick balance check\n"
                 "/stats - Performance statistics\n"
-                "/logs - Recent live logs (last 50 lines)\n\n"
-                "<b>Analytics:</b>\n"
+                "/logs - Recent live logs\n\n"
+                "<b>📈 Market Info:</b>\n"
+                "/market - Current market overview\n"
+                "/regime - Market regime analysis\n"
+                "/session - Current trading session\n\n"
+                "<b>📉 Position Control:</b>\n"
+                "/close [symbol] - Close specific position\n"
+                "/closeall - Close all positions (⚠️ careful!)\n\n"
+                "<b>📊 Analytics:</b>\n"
                 "/analytics - Full performance dashboard\n"
                 "/analytics daily - Last 30 days breakdown\n"
                 "/analytics symbols - Best trading pairs\n"
-                "/analytics hours - Optimal trading hours\n"
-                "/analytics ml - ML model accuracy\n"
                 "/dbstats - Database health and size\n\n"
-                "<b>ML Training:</b>\n"
+                "<b>🤖 ML Training:</b>\n"
                 "/train - Trigger ML model retraining\n\n"
-                "<b>Control:</b>\n"
-                "Use the inline buttons for:\n"
+                "<b>🎛️ Control Buttons:</b>\n"
                 "🚀 START - Resume trading\n"
                 "🛑 STOP - Pause trading\n\n"
-                "<b>Notes:</b>\n"
-                "• Real-time updates on signals\n"
-                "• Emergency alerts for big moves\n"
-                "• Risk warnings at -0.8% PnL\n"
-                "• TP notifications at +1.6% PnL\n"
-                "• PostgreSQL analytics (if DATABASE_URL set)\n\n"
-                "🎯 Target: 70% win rate | 3:1 R:R"
+                "<b>ℹ️ Notes:</b>\n"
+                "• Real-time signal notifications\n"
+                "• PnL warnings at key levels\n"
+                "• Hourly status updates (configurable)\n\n"
+                "🎯 Target: 70% win rate | 3.5:1 R:R"
             )
             
             await update.message.reply_text(message, parse_mode='HTML')
@@ -619,6 +687,270 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Error in /help command: {e}", exc_info=True)
             await update.message.reply_text("Error displaying help. Please try again.")
+    
+    # ==================== NEW ENHANCED COMMANDS ====================
+    
+    async def _cmd_market(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /market command - Show current market overview"""
+        try:
+            symbol = self.bot.symbol
+            
+            # Get current price
+            current_price = await self.bot.client.get_market_price(symbol)
+            
+            # Get 24h data if available
+            candles = self.bot.current_candles if hasattr(self.bot, 'current_candles') else []
+            
+            if candles and len(candles) > 0:
+                high_24h = max(c['high'] for c in candles[-1440:]) if len(candles) >= 1440 else max(c['high'] for c in candles)
+                low_24h = min(c['low'] for c in candles[-1440:]) if len(candles) >= 1440 else min(c['low'] for c in candles)
+                open_24h = candles[-min(1440, len(candles))]['open']
+                change_24h = ((float(current_price) - open_24h) / open_24h * 100) if open_24h else 0
+                change_emoji = "📈" if change_24h >= 0 else "📉"
+            else:
+                high_24h = low_24h = current_price
+                change_24h = 0
+                change_emoji = "➖"
+            
+            message = (
+                f"📊 *MARKET OVERVIEW - {symbol}*\n\n"
+                f"💵 Price: ${float(current_price):.4f}\n"
+                f"{change_emoji} 24h Change: {change_24h:+.2f}%\n"
+                f"📈 24h High: ${float(high_24h):.4f}\n"
+                f"📉 24h Low: ${float(low_24h):.4f}\n\n"
+                f"🕐 Time: {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}"
+            )
+            
+            await update.message.reply_text(message, parse_mode='Markdown')
+            
+        except Exception as e:
+            logger.error(f"Error in /market command: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error fetching market data: {str(e)[:100]}")
+    
+    async def _cmd_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /balance command - Quick balance check"""
+        try:
+            account_value = float(self.bot.account_value)
+            margin_used = float(self.bot.margin_used)
+            available = account_value - margin_used
+            
+            emoji = "🟢" if margin_used == 0 else "🟡" if margin_used < account_value * 0.5 else "🔴"
+            
+            message = (
+                f"💰 *BALANCE*\n\n"
+                f"{emoji} Total: ${account_value:.2f}\n"
+                f"📊 Margin: ${margin_used:.2f}\n"
+                f"✅ Available: ${available:.2f}"
+            )
+            
+            await update.message.reply_text(message, parse_mode='Markdown')
+            
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+    
+    async def _cmd_regime(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /regime command - Show current market regime"""
+        try:
+            if hasattr(self.bot, 'strategy') and hasattr(self.bot.strategy, 'strategies'):
+                # Get regime from world-class swing strategy
+                for name, strategy in self.bot.strategy.strategies.items():
+                    if hasattr(strategy, 'regime_detector'):
+                        candles = self.bot.current_candles if hasattr(self.bot, 'current_candles') else []
+                        if candles:
+                            regime = strategy.regime_detector.detect(candles)
+                            
+                            regime_emoji = {
+                                'trending_up': '📈🟢',
+                                'trending_down': '📉🔴', 
+                                'ranging': '↔️🟡',
+                                'volatile': '⚡🟠',
+                                'breakout': '🚀💥'
+                            }.get(regime.regime_type, '❓')
+                            
+                            message = (
+                                f"🧠 *MARKET REGIME ANALYSIS*\n\n"
+                                f"{regime_emoji} Regime: {regime.regime_type.upper()}\n"
+                                f"📊 Confidence: {regime.confidence:.0%}\n"
+                                f"📈 ADX: {regime.adx:.1f}\n"
+                                f"⚡ Volatility: {'High' if regime.volatility > 1.5 else 'Normal' if regime.volatility > 0.8 else 'Low'}\n"
+                                f"📊 Trend Strength: {regime.trend_strength:.0%}\n\n"
+                                f"💡 Strategy: {regime.preferred_strategy}"
+                            )
+                            
+                            await update.message.reply_text(message, parse_mode='Markdown')
+                            return
+            
+            await update.message.reply_text("❌ Regime detector not available")
+            
+        except Exception as e:
+            logger.error(f"Error in /regime command: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+    
+    async def _cmd_session(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /session command - Show current trading session"""
+        try:
+            if hasattr(self.bot, 'strategy') and hasattr(self.bot.strategy, 'strategies'):
+                for name, strategy in self.bot.strategy.strategies.items():
+                    if hasattr(strategy, 'session_manager'):
+                        session = strategy.session_manager.get_current_session()
+                        params = strategy.session_manager.get_session_params()
+                        
+                        session_emoji = {
+                            'asian': '🌏',
+                            'london': '🇬🇧',
+                            'us_morning': '🇺🇸',
+                            'us_afternoon': '🌆',
+                            'off_hours': '🌙'
+                        }.get(session, '❓')
+                        
+                        message = (
+                            f"⏰ *TRADING SESSION*\n\n"
+                            f"{session_emoji} Session: {session.upper()}\n\n"
+                            f"*Parameters:*\n"
+                            f"📊 Size Multiplier: {params.get('size_multiplier', 1):.2f}x\n"
+                            f"⚡ Volatility Factor: {params.get('volatility_factor', 1):.2f}x\n"
+                            f"🎯 Min Score Adjust: {params.get('min_score_adjust', 0):+d}\n"
+                            f"⏱️ Trade Frequency: {params.get('trade_frequency', 'normal')}\n"
+                            f"🛡️ Should Trade: {'Yes ✅' if params.get('should_trade', True) else 'No ❌'}\n\n"
+                            f"🕐 UTC Time: {datetime.now(timezone.utc).strftime('%H:%M')}"
+                        )
+                        
+                        await update.message.reply_text(message, parse_mode='Markdown')
+                        return
+            
+            await update.message.reply_text("❌ Session manager not available")
+            
+        except Exception as e:
+            logger.error(f"Error in /session command: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+    
+    async def _cmd_close(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /close command - Close a specific position"""
+        try:
+            args = context.args
+            if not args:
+                await update.message.reply_text(
+                    "⚠️ Usage: /close [symbol]\n\n"
+                    "Example: /close SOL",
+                    parse_mode='Markdown'
+                )
+                return
+            
+            symbol = args[0].upper()
+            
+            # Get current position
+            positions = self.bot.client.get_open_positions()
+            pos = next((p for p in positions if p['symbol'] == symbol), None)
+            
+            if not pos:
+                await update.message.reply_text(f"❌ No open position for {symbol}")
+                return
+            
+            # Confirm close
+            keyboard = [
+                [
+                    InlineKeyboardButton(f"✅ Close {symbol}", callback_data=f"confirm_close_{symbol}"),
+                    InlineKeyboardButton("❌ Cancel", callback_data="cancel_close")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            pnl_emoji = "🟢" if pos['unrealized_pnl'] >= 0 else "🔴"
+            message = (
+                f"⚠️ *CONFIRM CLOSE POSITION*\n\n"
+                f"📊 {pos['side'].upper()} {abs(pos['size']):.4f} {symbol}\n"
+                f"{pnl_emoji} Unrealized PnL: ${pos['unrealized_pnl']:+.2f}\n\n"
+                f"Are you sure you want to close this position?"
+            )
+            
+            await update.message.reply_text(message, reply_markup=reply_markup, parse_mode='Markdown')
+            
+        except Exception as e:
+            logger.error(f"Error in /close command: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+    
+    async def _cmd_closeall(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /closeall command - Close all positions"""
+        try:
+            positions = self.bot.client.get_open_positions()
+            
+            if not positions:
+                await update.message.reply_text("📭 No open positions to close")
+                return
+            
+            # Confirm close all
+            keyboard = [
+                [
+                    InlineKeyboardButton("⚠️ CLOSE ALL", callback_data="confirm_closeall"),
+                    InlineKeyboardButton("❌ Cancel", callback_data="cancel_close")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            total_pnl = sum(p['unrealized_pnl'] for p in positions)
+            pnl_emoji = "🟢" if total_pnl >= 0 else "🔴"
+            
+            message = (
+                f"⚠️ *CONFIRM CLOSE ALL POSITIONS*\n\n"
+                f"📊 Open Positions: {len(positions)}\n"
+                f"{pnl_emoji} Total Unrealized PnL: ${total_pnl:+.2f}\n\n"
+                f"⚠️ This will close ALL positions!\n"
+                f"Are you sure?"
+            )
+            
+            await update.message.reply_text(message, reply_markup=reply_markup, parse_mode='Markdown')
+            
+        except Exception as e:
+            logger.error(f"Error in /closeall command: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+    
+    # ==================== SCHEDULED TASKS ====================
+    
+    async def _scheduled_status_updates(self):
+        """Send periodic status updates"""
+        try:
+            while self.is_running:
+                await asyncio.sleep(self.status_update_interval)
+                
+                if not self.is_running:
+                    break
+                
+                # Build status message
+                account_value = float(self.bot.account_value)
+                margin_used = float(self.bot.margin_used)
+                uptime = datetime.now(timezone.utc) - self.session_start
+                
+                positions = self.bot.client.get_open_positions() if self.bot.client else []
+                total_pnl = sum(p['unrealized_pnl'] for p in positions) if positions else 0
+                pnl_emoji = "🟢" if total_pnl >= 0 else "🔴"
+                
+                message = (
+                    f"📊 *HOURLY STATUS UPDATE*\n\n"
+                    f"💰 Balance: ${account_value:.2f}\n"
+                    f"📊 Positions: {len(positions)}\n"
+                    f"{pnl_emoji} Unrealized PnL: ${total_pnl:+.2f}\n"
+                    f"🔄 Trades Today: {self.bot.trades_executed}\n"
+                    f"⏰ Uptime: {str(uptime).split('.')[0]}\n"
+                    f"🎯 Status: {'ACTIVE ✅' if self.bot.is_running and not self.bot.is_paused else 'PAUSED ⏸️'}"
+                )
+                
+                await self.send_message(message)
+                
+        except asyncio.CancelledError:
+            pass  # Normal shutdown
+        except Exception as e:
+            logger.error(f"Error in scheduled status updates: {e}")
+    
+    def _can_send_message(self, message_type: str) -> bool:
+        """Rate limiting check"""
+        now = datetime.now(timezone.utc)
+        last_time = self._last_message_time.get(message_type)
+        
+        if last_time and (now - last_time) < self._message_cooldown:
+            return False
+        
+        self._last_message_time[message_type] = now
+        return True
     
     # ==================== CALLBACK HANDLERS ====================
     
@@ -645,6 +977,84 @@ class TelegramBot:
             await self._handle_start_bot(query)
         elif action == "stop_bot":
             await self._handle_stop_bot(query)
+        elif action.startswith("confirm_close_"):
+            await self._handle_confirm_close(query, action.replace("confirm_close_", ""))
+        elif action == "confirm_closeall":
+            await self._handle_confirm_closeall(query)
+        elif action == "cancel_close":
+            await query.edit_message_text("❌ Close cancelled", parse_mode='Markdown')
+    
+    async def _handle_confirm_close(self, query, symbol: str):
+        """Handle confirmed position close"""
+        try:
+            # Get position
+            positions = self.bot.client.get_open_positions()
+            pos = next((p for p in positions if p['symbol'] == symbol), None)
+            
+            if not pos:
+                await query.edit_message_text(f"❌ Position {symbol} already closed")
+                return
+            
+            # Close position using market order
+            side = 'sell' if pos['side'] == 'long' else 'buy'
+            size = abs(pos['size'])
+            
+            await query.edit_message_text(f"⏳ Closing {symbol} position...")
+            
+            result = await self.bot.client.market_close(symbol, size, side)
+            
+            if result.get('status') == 'ok':
+                await query.edit_message_text(
+                    f"✅ *POSITION CLOSED*\n\n"
+                    f"📊 {pos['side'].upper()} {size:.4f} {symbol}\n"
+                    f"💰 Realized PnL: ~${pos['unrealized_pnl']:+.2f}",
+                    parse_mode='Markdown'
+                )
+            else:
+                await query.edit_message_text(f"❌ Failed to close: {result}")
+                
+        except Exception as e:
+            logger.error(f"Error closing position: {e}", exc_info=True)
+            await query.edit_message_text(f"❌ Error: {str(e)[:100]}")
+    
+    async def _handle_confirm_closeall(self, query):
+        """Handle confirmed close all positions"""
+        try:
+            positions = self.bot.client.get_open_positions()
+            
+            if not positions:
+                await query.edit_message_text("📭 No positions to close")
+                return
+            
+            await query.edit_message_text(f"⏳ Closing {len(positions)} positions...")
+            
+            closed = 0
+            total_pnl = 0
+            
+            for pos in positions:
+                try:
+                    side = 'sell' if pos['side'] == 'long' else 'buy'
+                    size = abs(pos['size'])
+                    
+                    result = await self.bot.client.market_close(pos['symbol'], size, side)
+                    
+                    if result.get('status') == 'ok':
+                        closed += 1
+                        total_pnl += pos['unrealized_pnl']
+                except Exception as e:
+                    logger.error(f"Error closing {pos['symbol']}: {e}")
+            
+            pnl_emoji = "🟢" if total_pnl >= 0 else "🔴"
+            await query.edit_message_text(
+                f"✅ *ALL POSITIONS CLOSED*\n\n"
+                f"📊 Closed: {closed}/{len(positions)}\n"
+                f"{pnl_emoji} Total PnL: ${total_pnl:+.2f}",
+                parse_mode='Markdown'
+            )
+            
+        except Exception as e:
+            logger.error(f"Error closing all positions: {e}", exc_info=True)
+            await query.edit_message_text(f"❌ Error: {str(e)[:100]}")
     
     async def _handle_start_bot(self, query):
         """Handle START button"""

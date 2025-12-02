@@ -22,18 +22,27 @@ class AutoTrainer:
     - Sends notifications via Telegram
     """
     
-    def __init__(self, min_trades_for_retrain: int = 100):
+    def __init__(self, min_trades_for_retrain: int = None):
         """
         Initialize auto-trainer
         
         Args:
             min_trades_for_retrain: Minimum new trades before retraining
         """
+        # Get from env or use default
+        if min_trades_for_retrain is None:
+            min_trades_for_retrain = int(os.getenv('MIN_TRADES_FOR_RETRAIN', '100'))
+        
         self.min_trades = min_trades_for_retrain
-        self.trades_dir = Path('data/trades')
+        self.trades_dir = Path(os.getenv('TRADE_LOG_PATH', 'data/trades'))
+        self.model_save_path = Path(os.getenv('MODEL_SAVE_PATH', 'ml/models/saved'))
         self.last_train_time: Optional[datetime] = None
         self.last_trade_count = 0
         self.is_training = False
+        
+        # Ensure directories exist
+        self.trades_dir.mkdir(parents=True, exist_ok=True)
+        self.model_save_path.mkdir(parents=True, exist_ok=True)
         
         # Count existing trades
         if self.trades_dir.exists():
@@ -41,6 +50,8 @@ class AutoTrainer:
         
         logger.info(f"🤖 Auto-Trainer initialized")
         logger.info(f"   Min trades for retrain: {self.min_trades}")
+        logger.info(f"   Trade log path: {self.trades_dir}")
+        logger.info(f"   Model save path: {self.model_save_path}")
         logger.info(f"   Current trade count: {self.last_trade_count}")
     
     def _count_trades(self) -> int:

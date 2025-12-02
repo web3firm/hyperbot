@@ -6,6 +6,15 @@
 
 **Enterprise-grade automated trading bot** combining rule-based strategies with machine learning for cryptocurrency futures trading on HyperLiquid DEX.
 
+## 🆕 Version 3.0 - Ultra-Lean SDK Integration
+
+**Major upgrade using official HyperLiquid Python SDK:**
+- **70% code reduction** in exchange integration (593 lines vs 1,970)
+- **Atomic TP/SL orders** via `bulk_orders(grouping="normalTpsl")`
+- **Direct SDK passthrough** for maximum execution speed
+- **Client Order IDs (cloid)** for reliable order tracking
+- **Dead man's switch** via `schedule_cancel()`
+
 ---
 
 ## ⚡ Quick Start
@@ -29,12 +38,18 @@ nano .env
 ```
 
 Required settings:
-- `HYPERLIQUID_ACCOUNT` - Your trading wallet address
-- `HYPERLIQUID_API_KEY` - API wallet address  
-- `HYPERLIQUID_API_SECRET` - API wallet private key
-- `TELEGRAM_BOT_TOKEN` - From @BotFather
-- `TELEGRAM_CHAT_ID` - Your Telegram chat ID
-- `DATABASE_URL` - PostgreSQL connection (optional)
+```env
+ACCOUNT_ADDRESS=0x...        # Your trading wallet address
+API_SECRET=0x...             # API wallet private key
+SYMBOL=SOL                   # Trading pair (BTC, ETH, SOL, etc.)
+MAX_LEVERAGE=5               # Leverage (1-50x)
+TAKE_PROFIT_PCT=2.0          # Take profit % per trade
+STOP_LOSS_PCT=1.0            # Stop loss % per trade
+POSITION_SIZE_PCT=70         # % of balance per trade
+TELEGRAM_BOT_TOKEN=...       # From @BotFather
+TELEGRAM_CHAT_ID=...         # Your Telegram chat ID
+DATABASE_URL=...             # PostgreSQL connection (optional)
+```
 
 ### **3. Start Trading**
 ```bash
@@ -43,158 +58,135 @@ npm install -g pm2
 pm2 start ecosystem.config.js
 pm2 logs hyperbot
 
-# Or using systemd
-sudo cp hyperbot.service /etc/systemd/system/
-sudo systemctl enable hyperbot
-sudo systemctl start hyperbot
+# Or run directly
+python -m app.bot
 ```
 
 ---
 
-## 📊 Key Features
+## 📊 Trading Strategies
 
-### **🎯 Trading Strategies**
-- **Swing Trading (70%)** - Trend-following, 1-3% moves
-- **Scalping (30%)** - Quick momentum, 0.4-0.8% moves
-- **Breakout Detection** - Volume + price action
-- **Mean Reversion** - Oversold/overbought bounces
+### **Active Strategies (Enterprise Mode)**
 
-### **🛡️ Risk Management**
-- **Kill Switch** - Auto-stops at -5% daily loss
-- **Drawdown Monitor** - 10% max from peak
-- **Position Limits** - Max 2 positions, 5x leverage
-- **Trailing Stop-Loss** - Locks profits at 7% PnL
-- **Trailing Take-Profit** - Dynamic profit protection
+| Strategy | Target Win Rate | R:R Ratio | Description |
+|----------|----------------|-----------|-------------|
+| **Swing Trading** | 70% | 3:1 | RSI + MACD + EMA + ADX confirmation, 5/8 signal score required |
+| **Scalping/Momentum** | 65% | 2:1 | Trend + momentum + confirmation bars, 60s cooldown |
 
-### **📈 Analytics & Monitoring**
-- **PostgreSQL Database** - Full trade history & analytics
-- **Telegram Bot** - Real-time monitoring & control
-- **ML Training** - Auto-retrains models on new data
-- **Performance Metrics** - Win rate, P&L, strategy stats
+### **Strategy Filters (Quality over Quantity)**
+- ✅ **ADX > 20** - Only trade in trending markets
+- ✅ **Signal Score ≥ 5/8** - Multi-indicator confirmation
+- ✅ **Trend Alignment** - Trade with the trend, not against
+- ✅ **Support/Resistance** - Avoid buying at highs, selling at lows
+- ✅ **Volume Confirmation** - 1.2x average volume minimum
+
+### **Disabled Strategies** (Low win rate)
+- ❌ Mean Reversion (37.5% win rate)
+- ❌ Breakout (insufficient filters)
+- ❌ Volume Spike (overtrading)
+
+---
+
+## 🛡️ Risk Management
+
+### **Multi-Layer Protection**
+```
+Kill Switch
+├─ Daily Loss: -5% → Stop trading
+├─ Drawdown: -10% from peak → Pause
+├─ Position Loss: -8% single position → Close
+└─ Error Rate: >50% failed trades → Halt
+
+Position Limits
+├─ Max Positions: 3 concurrent
+├─ Max Leverage: 5x (configurable)
+├─ Position Size: 70% of balance (configurable)
+└─ Margin Usage: <80%
+
+Dynamic Trailing
+├─ At 7% PnL: Move SL to breakeven + 2.5%
+├─ At 10% PnL: Move TP closer (target 12%)
+└─ At 12% PnL: Aggressive trailing near current price
+```
 
 ---
 
 ## 🔧 Architecture
 
+### **Core Components**
+```
+app/
+├── bot.py                 # Master controller (1024 lines)
+├── telegram_bot.py        # Telegram interface
+├── hl/                    # HyperLiquid SDK Integration (593 lines total)
+│   ├── hl_client.py       # SDK passthrough (178 lines)
+│   ├── hl_order_manager.py # Atomic TP/SL orders (203 lines)
+│   └── hl_websocket.py    # Real-time subscriptions (212 lines)
+├── strategies/
+│   ├── strategy_manager.py # Parallel strategy execution
+│   ├── rule_based/         # Active strategies
+│   │   ├── swing_trader.py # Primary (741 lines)
+│   │   └── scalping_2pct.py # Secondary (259 lines)
+│   └── core/               # Shared components
+├── risk/
+│   ├── risk_engine.py     # Pre-trade validation
+│   ├── kill_switch.py     # Emergency stop
+│   └── drawdown_monitor.py # Equity tracking
+└── utils/
+    ├── indicator_calculator.py # Shared indicators
+    └── trading_logger.py       # Logging
+```
+
+### **Execution Flow**
 ```
 Main Loop (1s interval)
-├─ Fetch Market Data (price, volume, indicators)
-├─ Run All Strategies in Parallel
-│  ├─ Swing Trader
-│  ├─ Scalping Strategy
-│  ├─ Breakout Strategy
-│  └─ Mean Reversion Strategy
-├─ Filter Valid Signals (confidence >70%)
-├─ Risk Engine Validation
-│  ├─ Check daily loss limit
-│  ├─ Check position limits
-│  ├─ Check leverage limits
-│  └─ Check correlation
-└─ Execute Trade if Approved
-
-Monitoring Loops (parallel)
-├─ Account Updates (5s) - equity, margin, positions
-├─ Position Monitoring (1s) - SL/TP tracking, trailing
-├─ Risk Checks (10s) - drawdown, kill switch
-└─ ML Training (24h) - auto-retrain on new data
+├─ Fetch Market Data (candles, price, volume)
+├─ Calculate Indicators Once (shared calculator)
+│   └─ RSI, MACD, EMA, ADX, ATR, Bollinger Bands
+├─ Run Strategies in Parallel
+│   ├─ Swing Trader (primary)
+│   └─ Scalping (secondary)
+├─ Validate Signal with Risk Engine
+│   ├─ Position limits
+│   ├─ Margin availability
+│   ├─ Daily loss check
+│   └─ Drawdown limit
+├─ Execute with Atomic TP/SL
+│   └─ bulk_orders(grouping="normalTpsl")
+└─ Track & Log for ML Training
 ```
 
 ---
 
-## 💬 Telegram Commands
+## 📱 Telegram Commands
 
-### **Monitoring**
-- `/status` - Bot status, account balance, uptime
-- `/positions` - Active positions with live P&L
-- `/trades` - Last 10 completed trades
-- `/pnl` - Daily and weekly P&L breakdown
-- `/stats` - Strategy performance statistics
-- `/logs` - Recent bot logs (last 30 entries)
+| Command | Description |
+|---------|-------------|
+| `/status` | Bot status, account balance, uptime |
+| `/positions` | Active positions with live P&L |
+| `/trades` | Last 10 completed trades |
+| `/pnl` | Daily and weekly P&L |
+| `/stats` | Strategy performance stats |
+| `/analytics` | Full performance dashboard |
+| `/logs` | Recent bot logs |
+| `/help` | All available commands |
 
-### **Analytics**
-- `/analytics` - Full performance dashboard
-- `/analytics daily` - Last 30 days breakdown
-- `/analytics symbols` - Best trading pairs
-- `/analytics hours` - Optimal trading hours
-- `/analytics ml` - ML model accuracy
-- `/dbstats` - Database health and statistics
-
-### **Control**
-- `/help` - Show all commands
-- `/train` - Trigger ML model retraining
-- 🚀 **START** button - Resume trading
-- 🛑 **STOP** button - Pause trading
+**Control Buttons:**
+- 🚀 **START** - Resume trading
+- 🛑 **STOP** - Pause trading
 
 ---
 
-## 📁 Project Structure
+## 📈 Performance Targets
 
-```
-hyperbot/
-├── app/                  # Main application
-│   ├── bot.py           # Master controller
-│   ├── telegram_bot.py  # Telegram interface
-│   ├── hl/              # HyperLiquid integration
-│   ├── strategies/      # Trading strategies
-│   ├── risk/            # Risk management
-│   ├── database/        # PostgreSQL integration
-│   └── utils/           # Utilities
-├── ml/                  # Machine learning
-├── config/              # Configuration files
-├── logs/                # Log files
-├── .env                 # Environment variables (not in git)
-├── requirements.txt     # Python dependencies
-├── ecosystem.config.js  # PM2 configuration
-├── hyperbot.service     # Systemd service file
-├── README.md            # This file
-└── PRODUCTION_GUIDE.md  # Complete deployment guide
-```
-
----
-
-## 🎓 Documentation
-
-- **[PRODUCTION_GUIDE.md](PRODUCTION_GUIDE.md)** - Complete deployment guide
-  - Trading schedule & activity patterns
-  - Strategy explanations
-  - Risk management details
-  - Performance expectations
-  - Troubleshooting guide
-  - Security best practices
-
-- **[archive/old_docs/](archive/old_docs/)** - Historical documentation
-  - Database migration notes
-  - VPS deployment guides
-  - Feature explanations
-
----
-
-## ⚙️ Configuration
-
-### **Trading Parameters** (config/trading_rules.yml)
-```yaml
-loop_interval: 0.5          # Main loop speed (seconds)
-max_leverage: 5             # Maximum leverage
-position_size_pct: 0.8      # % of balance per trade
-max_positions: 2            # Concurrent positions limit
-daily_loss_limit_pct: 5     # Kill switch trigger
-```
-
-### **Strategy Settings**
-- **Swing Trading**: 1% SL, 3% TP, RSI + EMA
-- **Scalping**: 0.4% SL, 0.8% TP, Quick momentum
-- **Breakout**: Volume spike + price breakout
-- **Mean Reversion**: RSI oversold/overbought
-
----
-
-## 📊 Performance Targets
-
-- **Win Rate**: 70% (target)
-- **Risk-Reward**: 3:1 ratio
-- **Daily Target**: +2-5% account growth
-- **Max Daily Loss**: -5% (kill switch)
-- **Trading Frequency**: 10-50 trades/day (varies)
+| Metric | Target |
+|--------|--------|
+| Win Rate | 70% |
+| Risk-Reward | 3:1 |
+| Daily Target | +2-5% |
+| Max Daily Loss | -5% (kill switch) |
+| Max Drawdown | -10% |
+| Trades/Day | 10-30 (quality focused) |
 
 ---
 
@@ -292,8 +284,8 @@ This bot is a **trading tool**, not financial advice:
 
 ---
 
-**Version**: 2.0 (Production Ready)  
-**Last Updated**: November 19, 2025  
+**Version**: 3.0 (Ultra-Lean SDK Integration)  
+**Last Updated**: December 2, 2025  
 **License**: MIT
 
 **⚡ Ready to trade? Let's go! 🚀**

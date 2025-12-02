@@ -1,389 +1,293 @@
 """
-Hyperliquid WebSocket Manager V2
-Real-time market data + account updates using official SDK WebSocket
+HyperLiquid WebSocket - Ultra-Lean SDK Passthrough
+Uses SDK info.subscribe() for all real-time data.
 """
-
+import os
 import asyncio
-import logging
-from typing import Dict, Any, Optional, Callable, List
-from decimal import Decimal
-from collections import deque
-import json
+import threading
+from typing import Optional, Dict, Any, Callable, List, Set
+from hyperliquid.info import Info
+from hyperliquid.utils import constants
+from app.utils.trading_logger import TradingLogger
 
-logger = logging.getLogger(__name__)
+logger = TradingLogger("hl_websocket")
 
 
 class HLWebSocket:
     """
-    WebSocket manager for HyperLiquid using official SDK
-    - Market data: orderbook, trades, candles
-    - Account data: positions, fills, orders (eliminates polling!)
+    Ultra-lean WebSocket using SDK info.subscribe().
+    
+    Subscription types (SDK native):
+    - allMids: All mid prices
+    - l2Book: Order book depth
+    - trades: Trade feed
+    - candle: Candlestick data
+    - userEvents: All user events (fills, orders, funding)
+    - userFills: User fill events only
+    - orderUpdates: Order status updates
+    - userFundings: Funding payments
+    - bbo: Best bid/offer
     """
     
-    def __init__(self, symbols: List[str] = None, account_address: Optional[str] = None):
-        """
-        Initialize websocket manager
+    def __init__(self, address: str, testnet: bool = False):
+        self.address = address
         
-        Args:
-            symbols: List of symbols to track (e.g., ['BTC'], ['ETH'], ['SOL'])
-            account_address: User address for account updates (optional)
-        """
-        self.symbols = symbols if symbols else ['SOL']
-        self.account_address = account_address
-        self.running = False
+        # Get RPC URL from env or use SDK defaults
+        if testnet:
+            base_url = os.getenv('TESTNET_RPC_URL', constants.TESTNET_API_URL)
+        else:
+            base_url = os.getenv('MAINNET_RPC_URL', constants.MAINNET_API_URL)
         
-        # Market data storage
-        self.orderbooks: Dict[str, Dict] = {}
-        self.recent_trades: Dict[str, deque] = {}
-        self.candles: Dict[str, Dict] = {}
-        self._max_candles = 100  # PHASE 4: Memory optimization
-        self._max_trades = 100   # PHASE 4: Memory optimization
-        self.prices: Dict[str, Decimal] = {}
+        # SDK Info with WebSocket enabled
+        self.info = Info(base_url, skip_ws=False)
         
-        # Account data storage (replaces polling!)
-        self.positions: List[Dict] = []
-        self.account_value: Decimal = Decimal('0')
-        self.margin_used: Decimal = Decimal('0')
-        self.open_orders: List[Dict] = []
-        self.recent_fills: deque = deque(maxlen=100)
+        # Callbacks by subscription type
+        self._callbacks: Dict[str, List[Callable]] = {}
+        self._active_subs: Set[str] = set()
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
         
-        # Callbacks
-        self.on_orderbook_callbacks: List[Callable] = []
-        self.on_trade_callbacks: List[Callable] = []
-        self.on_candle_callbacks: List[Callable] = []
-        self.on_position_callbacks: List[Callable] = []  # NEW
-        self.on_fill_callbacks: List[Callable] = []      # NEW
-        self.on_order_update_callbacks: List[Callable] = []  # PHASE 4: Real-time order updates
-        
-        # Initialize storage for symbols
-        for symbol in self.symbols:
-            self.recent_trades[symbol] = deque(maxlen=self._max_trades)
-            self.candles[symbol] = {}
-            self.orderbooks[symbol] = {'bids': [], 'asks': []}
-        
-        logger.info(f"📡 HyperLiquid WebSocket V2 initialized for {self.symbols}")
-        if account_address:
-            logger.info(f"📊 Account updates enabled for {account_address[:10]}...")
-            logger.info(f"🚀 PHASE 4: Real-time order updates enabled")
+        # Market data cache (populated by subscriptions)
+        self._market_data: Dict[str, Dict[str, Any]] = {}
+        self._all_mids: Dict[str, float] = {}
     
-    async def start(self, info_client=None):
-        """
-        Start websocket connection with SDK subscriptions
-        
-        Args:
-            info_client: hyperliquid.info.Info instance for WebSocket subscriptions
-        """
-        self.running = True
-        self.info_client = info_client
-        logger.info("🚀 WebSocket V2 started")
-        
-        # Subscribe to user events if account provided
-        if self.account_address and info_client:
-            try:
-                # Subscribe to user state updates (positions, balance, fills)
-                info_client.subscribe(
-                    {"type": "userEvents", "user": self.account_address},
-                    self._handle_user_event
-                )
-                
-                # PHASE 4: Subscribe to order updates (fills, cancels, triggers)
-                info_client.subscribe(
-                    {"type": "orderUpdates", "user": self.account_address},
-                    self._handle_order_update
-                )
-                
-                logger.info(f"✅ Subscribed to account + order updates for {self.account_address[:10]}...")
-            except Exception as e:
-                logger.warning(f"⚠️ Could not subscribe to user events: {e}")
-                logger.info("📊 Falling back to polling for account data")
-        
-        # Subscribe to market data for each symbol
-        for symbol in self.symbols:
-            try:
-                if info_client:
-                    # Subscribe to trades
-                    info_client.subscribe(
-                        {"type": "trades", "coin": symbol},
-                        lambda data, s=symbol: self._handle_trade(s, data)
-                    )
-                    
-                    # Subscribe to L2 book updates
-                    info_client.subscribe(
-                        {"type": "l2Book", "coin": symbol},
-                        lambda data, s=symbol: self._handle_orderbook(s, data)
-                    )
-                    
-                    # Subscribe to 1-minute candles (Phase 3 optimization)
-                    info_client.subscribe(
-                        {"type": "candle", "coin": symbol, "interval": "1m"},
-                        lambda data, s=symbol: self._handle_candle(s, data)
-                    )
-                    
-                    logger.info(f"✅ Subscribed to {symbol} market data + candles")
-            except Exception as e:
-                logger.warning(f"⚠️ Could not subscribe to {symbol}: {e}")
+    # ==================== CALLBACK MANAGEMENT ====================
+    def add_callback(self, sub_type: str, callback: Callable):
+        """Register callback for subscription type."""
+        if sub_type not in self._callbacks:
+            self._callbacks[sub_type] = []
+        self._callbacks[sub_type].append(callback)
     
-    def _handle_user_event(self, event: Dict[str, Any]):
-        """Handle user event updates (positions, fills, orders)"""
-        try:
-            event_type = event.get('type')
-            
-            if event_type == 'fill':
-                # New fill received
-                self.recent_fills.append(event)
-                logger.info(f"📥 Fill: {event.get('coin')} {event.get('side')} {event.get('sz')} @ {event.get('px')}")
+    def remove_callback(self, sub_type: str, callback: Callable):
+        """Remove callback for subscription type."""
+        if sub_type in self._callbacks and callback in self._callbacks[sub_type]:
+            self._callbacks[sub_type].remove(callback)
+    
+    def _dispatch(self, sub_type: str, data: Any):
+        """Dispatch data to registered callbacks."""
+        for cb in self._callbacks.get(sub_type, []):
+            try:
+                cb(data)
+            except Exception as e:
+                logger.error(f"Callback error for {sub_type}: {e}")
+    
+    # ==================== SUBSCRIPTIONS ====================
+    def subscribe_all_mids(self, callback: Optional[Callable] = None):
+        """Subscribe to all mid prices."""
+        def _handle_mids(msg):
+            # Update internal cache
+            if isinstance(msg, dict) and "mids" in msg:
+                self._all_mids = {k: float(v) for k, v in msg.get("mids", {}).items()}
+                # Update market data for each symbol
+                for symbol, price in self._all_mids.items():
+                    if symbol not in self._market_data:
+                        self._market_data[symbol] = {}
+                    self._market_data[symbol]["price"] = price
+            self._dispatch("allMids", msg)
+        
+        if callback:
+            self.add_callback("allMids", callback)
+        self.info.subscribe({"type": "allMids"}, _handle_mids)
+        self._active_subs.add("allMids")
+        logger.info("Subscribed to allMids")
+    
+    def subscribe_l2_book(self, symbol: str, callback: Optional[Callable] = None):
+        """Subscribe to order book for symbol."""
+        sub_key = f"l2Book:{symbol}"
+        if callback:
+            self.add_callback(sub_key, callback)
+        self.info.subscribe(
+            {"type": "l2Book", "coin": symbol},
+            lambda msg: self._dispatch(sub_key, msg)
+        )
+        self._active_subs.add(sub_key)
+        logger.info(f"Subscribed to l2Book:{symbol}")
+    
+    def subscribe_trades(self, symbol: str, callback: Optional[Callable] = None):
+        """Subscribe to trade feed for symbol."""
+        sub_key = f"trades:{symbol}"
+        if callback:
+            self.add_callback(sub_key, callback)
+        self.info.subscribe(
+            {"type": "trades", "coin": symbol},
+            lambda msg: self._dispatch(sub_key, msg)
+        )
+        self._active_subs.add(sub_key)
+        logger.info(f"Subscribed to trades:{symbol}")
+    
+    def subscribe_candles(self, symbol: str, interval: str = "1m", 
+                          callback: Optional[Callable] = None):
+        """
+        Subscribe to candlestick data.
+        Intervals: 1m, 5m, 15m, 30m, 1h, 4h, 1d
+        """
+        sub_key = f"candle:{symbol}:{interval}"
+        
+        def _handle_candle(msg: Dict):
+            """Handle candle message and dispatch with (symbol, candle) signature."""
+            try:
+                # Extract candle data from message
+                data = msg.get("data", msg)
+                if isinstance(data, list) and len(data) > 0:
+                    candle = data[-1]  # Latest candle
+                elif isinstance(data, dict):
+                    candle = data
+                else:
+                    candle = msg
                 
-                # Notify callbacks
-                for callback in self.on_fill_callbacks:
+                # Dispatch with symbol for callbacks expecting (symbol, candle)
+                for cb in self._callbacks.get(sub_key, []):
                     try:
-                        callback(event)
-                    except Exception as e:
-                        logger.error(f"Fill callback error: {e}")
-            
-            elif event_type == 'position':
-                # Position update
-                self._update_positions(event)
-                
-                # Notify callbacks
-                for callback in self.on_position_callbacks:
-                    try:
-                        callback(event)
-                    except Exception as e:
-                        logger.error(f"Position callback error: {e}")
-            
-            elif event_type == 'liquidation':
-                logger.error(f"🚨 LIQUIDATION: {event}")
-            
-        except Exception as e:
-            logger.error(f"Error handling user event: {e}")
-    
-    def _handle_order_update(self, update: Dict[str, Any]):
-        """
-        Handle real-time order updates (PHASE 4)
-        
-        Triggers on:
-        - Order filled (partial or full)
-        - Order cancelled
-        - Stop loss/take profit triggered
-        - Order rejected
-        
-        Provides instant notifications vs waiting for next loop iteration
-        """
-        try:
-            status = update.get('status')
-            order = update.get('order', {})
-            
-            coin = order.get('coin', 'UNKNOWN')
-            side = order.get('side', 'unknown')
-            size = order.get('sz', 0)
-            price = order.get('limitPx') or order.get('triggerPx', 0)
-            
-            # Log different order events
-            if status == 'filled':
-                logger.info(f"✅ ORDER FILLED: {coin} {side} {size} @ {price}")
-            elif status == 'canceled':
-                logger.info(f"🚫 ORDER CANCELLED: {coin} {side} {size} @ {price}")
-            elif status == 'triggered':
-                logger.info(f"⚡ STOP TRIGGERED: {coin} {side} {size} @ {price}")
-            elif status == 'rejected':
-                logger.error(f"❌ ORDER REJECTED: {coin} {side} {size} @ {price}")
-            else:
-                logger.debug(f"🔄 Order update: {status} - {coin} {side}")
-            
-            # Notify callbacks for immediate action (e.g., Telegram alerts)
-            for callback in self.on_order_update_callbacks:
-                try:
-                    callback(update)
-                except Exception as e:
-                    logger.error(f"Order update callback error: {e}")
-                    
-        except Exception as e:
-            logger.error(f"Error handling order update: {e}")
-    
-    def _update_positions(self, event: Dict[str, Any]):
-        """Update internal positions cache from WebSocket data"""
-        # This replaces the need to poll user_state()
-        positions_data = event.get('positions', [])
-        self.positions = []
-        
-        for pos in positions_data:
-            if float(pos.get('szi', 0)) != 0:
-                self.positions.append({
-                    'symbol': pos.get('coin'),
-                    'size': float(pos.get('szi', 0)),
-                    'side': 'long' if float(pos.get('szi', 0)) > 0 else 'short',
-                    'entry_price': float(pos.get('entryPx', 0)),
-                    'unrealized_pnl': float(pos.get('unrealizedPnl', 0)),
-                    'leverage': float(pos.get('leverage', {}).get('value', 1) if isinstance(pos.get('leverage'), dict) else pos.get('leverage', 1))
-                })
-        
-        # Update account value
-        if 'marginSummary' in event:
-            summary = event['marginSummary']
-            self.account_value = Decimal(str(summary.get('accountValue', '0')))
-            self.margin_used = Decimal(str(summary.get('totalMarginUsed', '0')))
-    
-    def _handle_trade(self, symbol: str, trade: Dict[str, Any]):
-        """Handle trade update"""
-        self.recent_trades[symbol].append(trade)
-        
-        # Update price
-        if 'px' in trade:
-            self.prices[symbol] = Decimal(str(trade['px']))
-        
-        # Notify callbacks
-        for callback in self.on_trade_callbacks:
-            try:
-                callback(symbol, trade)
+                        cb(symbol, candle)
+                    except TypeError:
+                        # Callback doesn't expect symbol, just pass candle
+                        cb(candle)
             except Exception as e:
-                logger.error(f"Trade callback error: {e}")
-    
-    def _handle_orderbook(self, symbol: str, book: Dict[str, Any]):
-        """Handle orderbook update"""
-        self.orderbooks[symbol] = {
-            'bids': book.get('levels', [[]])[0],
-            'asks': book.get('levels', [[]])[1] if len(book.get('levels', [])) > 1 else [],
-            'mid': (float(book.get('levels', [[0]])[0][0][0]) + float(book.get('levels', [[0, 0]])[1][0][0])) / 2 if book.get('levels') else 0
-        }
+                logger.error(f"Callback error for {sub_key}: {e}")
         
-        # Update price from mid
-        if self.orderbooks[symbol]['mid']:
-            self.prices[symbol] = Decimal(str(self.orderbooks[symbol]['mid']))
-        
-        # Notify callbacks
-        for callback in self.on_orderbook_callbacks:
-            try:
-                callback(symbol, book)
-            except Exception as e:
-                logger.error(f"Orderbook callback error: {e}")
+        if callback:
+            self.add_callback(sub_key, callback)
+        self.info.subscribe(
+            {"type": "candle", "coin": symbol, "interval": interval},
+            _handle_candle
+        )
+        self._active_subs.add(sub_key)
+        logger.info(f"Subscribed to candle:{symbol}:{interval}")
     
-    def _handle_candle(self, symbol: str, candle: Dict[str, Any]):
-        """
-        Handle real-time candle update (Phase 3 optimization)
-        Replaces polling get_candles() every 10 minutes
-        """
-        try:
-            # Store latest candle
-            timestamp = candle.get('t', 0)
-            self.candles[symbol][timestamp] = {
-                'time': timestamp,
-                'open': float(candle.get('o', 0)),
-                'high': float(candle.get('h', 0)),
-                'low': float(candle.get('l', 0)),
-                'close': float(candle.get('c', 0)),
-                'volume': float(candle.get('v', 0))
-            }
-            # PHASE 4: Limit candle history to last 100
-            if len(self.candles[symbol]) > self._max_candles:
-                # Remove oldest candle(s)
-                for old_ts in sorted(self.candles[symbol])[:-self._max_candles]:
-                    del self.candles[symbol][old_ts]
-            
-            logger.debug(f"📊 Candle update: {symbol} close=${candle.get('c')}")
-            
-            # Notify callbacks (for indicator recalculation)
-            for callback in self.on_candle_callbacks:
-                try:
-                    callback(symbol, candle)
-                except Exception as e:
-                    logger.error(f"Candle callback error: {e}")
-                    
-        except Exception as e:
-            logger.error(f"Error handling candle: {e}")
+    def subscribe_user_events(self, callback: Optional[Callable] = None):
+        """Subscribe to all user events (fills, orders, funding)."""
+        if callback:
+            self.add_callback("userEvents", callback)
+        self.info.subscribe(
+            {"type": "userEvents", "user": self.address},
+            lambda msg: self._dispatch("userEvents", msg)
+        )
+        self._active_subs.add("userEvents")
+        logger.info("Subscribed to userEvents")
     
-    def get_account_state(self) -> Dict[str, Any]:
-        """
-        Get current account state from WebSocket cache
-        
-        Replaces polling client.get_account_state()!
-        Returns instantly from cache instead of API call.
-        """
-        return {
-            'account_value': float(self.account_value),
-            'margin_used': float(self.margin_used),
-            'positions': self.positions,
-            'open_orders': self.open_orders
-        }
+    def subscribe_user_fills(self, callback: Optional[Callable] = None):
+        """Subscribe to user fill events only."""
+        if callback:
+            self.add_callback("userFills", callback)
+        self.info.subscribe(
+            {"type": "userFills", "user": self.address},
+            lambda msg: self._dispatch("userFills", msg)
+        )
+        self._active_subs.add("userFills")
+        logger.info("Subscribed to userFills")
     
-    async def stop(self):
-        """Stop websocket connection"""
-        self.running = False
-        logger.info("🛑 WebSocket stopped")
+    def subscribe_order_updates(self, callback: Optional[Callable] = None):
+        """Subscribe to order status updates."""
+        if callback:
+            self.add_callback("orderUpdates", callback)
+        self.info.subscribe(
+            {"type": "orderUpdates", "user": self.address},
+            lambda msg: self._dispatch("orderUpdates", msg)
+        )
+        self._active_subs.add("orderUpdates")
+        logger.info("Subscribed to orderUpdates")
     
-    async def _poll_market_data(self):
-        """Poll market data as fallback (HyperLiquid SDK doesn't expose WS directly)"""
-        from hyperliquid.info import Info
-        from hyperliquid.utils import constants
-        
-        info = Info(constants.MAINNET_API_URL, skip_ws=True)
-        
-        while self.running:
-            try:
-                # Get latest prices
-                all_mids = info.all_mids()
-                
-                for symbol in self.symbols:
-                    if symbol in all_mids:
-                        price = Decimal(str(all_mids[symbol]))
-                        self.prices[symbol] = price
-                        
-                        # Update orderbook mid price
-                        self.orderbooks[symbol]['mid'] = float(price)
-                
-                # Get L2 orderbook snapshot periodically
-                for symbol in self.symbols:
-                    try:
-                        l2_data = info.l2_snapshot(symbol)
-                        if l2_data:
-                            self.orderbooks[symbol] = {
-                                'bids': [[float(p[0]['px']), float(p[0]['sz'])] for p in l2_data.get('levels', [[]])[0][:10]],
-                                'asks': [[float(p[0]['px']), float(p[0]['sz'])] for p in l2_data.get('levels', [[]])[1][:10]],
-                                'mid': float(self.prices.get(symbol, 0))
-                            }
-                    except Exception as e:
-                        logger.debug(f"Error getting L2 for {symbol}: {e}")
-                
-                await asyncio.sleep(0.5)  # Poll every 500ms
-                
-            except Exception as e:
-                logger.error(f"Error polling market data: {e}")
-                await asyncio.sleep(1)
+    def subscribe_user_fundings(self, callback: Optional[Callable] = None):
+        """Subscribe to funding payments."""
+        if callback:
+            self.add_callback("userFundings", callback)
+        self.info.subscribe(
+            {"type": "userFundings", "user": self.address},
+            lambda msg: self._dispatch("userFundings", msg)
+        )
+        self._active_subs.add("userFundings")
+        logger.info("Subscribed to userFundings")
     
-    def get_price(self, symbol: str) -> Optional[Decimal]:
-        """Get latest price for symbol"""
-        return self.prices.get(symbol)
+    def subscribe_bbo(self, symbol: str, callback: Optional[Callable] = None):
+        """Subscribe to best bid/offer for symbol."""
+        sub_key = f"bbo:{symbol}"
+        if callback:
+            self.add_callback(sub_key, callback)
+        self.info.subscribe(
+            {"type": "bbo", "coin": symbol},
+            lambda msg: self._dispatch(sub_key, msg)
+        )
+        self._active_subs.add(sub_key)
+        logger.info(f"Subscribed to bbo:{symbol}")
     
-    def get_orderbook(self, symbol: str) -> Dict[str, Any]:
-        """Get orderbook for symbol"""
-        return self.orderbooks.get(symbol, {'bids': [], 'asks': [], 'mid': 0})
+    # ==================== LIFECYCLE ====================
+    def start(self):
+        """Start WebSocket processing in background thread."""
+        if self._running:
+            return
+        self._running = True
+        logger.info("WebSocket started")
     
-    def get_recent_trades(self, symbol: str, count: int = 10) -> List[Dict]:
-        """Get recent trades for symbol"""
-        trades = list(self.recent_trades.get(symbol, []))
-        return trades[-count:]
+    def stop(self):
+        """Stop WebSocket and cleanup."""
+        self._running = False
+        self._active_subs.clear()
+        self._callbacks.clear()
+        logger.info("WebSocket stopped")
     
+    def is_connected(self) -> bool:
+        """Check if WebSocket is active."""
+        return self._running and len(self._active_subs) > 0
+    
+    @property
+    def active_subscriptions(self) -> Set[str]:
+        """Get list of active subscriptions."""
+        return self._active_subs.copy()
+    
+    # ==================== BOT.PY COMPATIBILITY ALIASES ====================
+    def add_candle_callback(self, callback: Callable):
+        """Alias for bot.py compatibility - adds candle callback."""
+        self.add_callback("candle", callback)
+    
+    def add_order_update_callback(self, callback: Callable):
+        """Alias for bot.py compatibility - adds order update callback."""
+        self.add_callback("orderUpdates", callback)
+    
+    def add_fill_callback(self, callback: Callable):
+        """Alias for bot.py compatibility - adds fill callback."""
+        self.add_callback("userFills", callback)
+    
+    def get_cached_state(self) -> Optional[Dict]:
+        """Get cached account state (for client integration)."""
+        # This would be populated by userEvents subscription
+        return None  # Not implemented - falls back to API
+    
+    # ==================== MARKET DATA ACCESS ====================
     def get_market_data(self, symbol: str) -> Dict[str, Any]:
         """
-        Get complete market data for symbol
+        Get cached market data for symbol.
         
-        Returns:
-            Dict with price, orderbook, trades
+        Returns dict with:
+        - price: Current mid price
+        - bid: Best bid (if l2Book subscribed)
+        - ask: Best ask (if l2Book subscribed)
+        - volume: 24h volume (if available)
         """
-        return {
-            'symbol': symbol,
-            'price': float(self.prices.get(symbol, 0)),
-            'orderbook': self.get_orderbook(symbol),
-            'recent_trades': self.get_recent_trades(symbol, 10)
-        }
+        # First try symbol-specific cache
+        data = self._market_data.get(symbol, {}).copy()
+        
+        # Fallback to allMids for price
+        if "price" not in data and symbol in self._all_mids:
+            data["price"] = self._all_mids[symbol]
+        
+        # If still no price, try fetching from info API
+        if "price" not in data:
+            try:
+                mids = self.info.all_mids()
+                if symbol in mids:
+                    data["price"] = float(mids[symbol])
+                    self._all_mids[symbol] = data["price"]
+            except Exception as e:
+                logger.error(f"Failed to fetch mids: {e}")
+        
+        return data if data else {"price": None}
     
-    def add_orderbook_callback(self, callback: Callable):
-        """Add callback for orderbook updates"""
-        self.on_orderbook_callbacks.append(callback)
-    
-    def add_trade_callback(self, callback: Callable):
-        """Add callback for trade updates"""
-        self.on_trade_callbacks.append(callback)
-    
-    def add_candle_callback(self, callback: Callable):
-        """Add callback for candle updates"""
-        self.on_candle_callbacks.append(callback)
+    def get_all_prices(self) -> Dict[str, float]:
+        """Get all cached mid prices."""
+        return self._all_mids.copy()
+
+
+# Factory function
+def create_websocket(address: str, testnet: bool = False) -> HLWebSocket:
+    """Create HLWebSocket instance."""
+    return HLWebSocket(address, testnet)

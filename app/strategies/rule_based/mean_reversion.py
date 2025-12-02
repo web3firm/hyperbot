@@ -37,7 +37,7 @@ class MeanReversionStrategy:
         self.deviation_threshold = Decimal('0.3')  # 0.3% from SMA triggers
         self.tp_pct = Decimal('0.3')  # Target return to mean
         self.sl_pct = Decimal('0.15')  # Stop beyond deviation
-        self.position_size_pct = Decimal(os.getenv('POSITION_SIZE_PCT', '68.0'))
+        self.position_size_pct = Decimal(os.getenv('POSITION_SIZE_PCT', '50'))
         
         # Moving average period
         self.sma_period = 20

@@ -71,7 +71,7 @@ class SensitiveDataFilter(logging.Filter):
 # Import HyperLiquid integration
 from app.hl.hl_client import HyperLiquidClient
 from app.hl.hl_websocket import HLWebSocket
-from app.hl.hl_order_manager_v2 import HLOrderManagerV2  # V2: Uses SDK bulk_orders
+from app.hl.hl_order_manager import HLOrderManager
 
 # Import strategies
 from app.strategies.strategy_manager import StrategyManager
@@ -135,6 +135,13 @@ class HyperAIBot:
     """
     Master trading bot controller
     Manages strategy execution, risk controls, and mode transitions
+    
+    V3 Upgrade: Uses full SDK integration with:
+    - Client Order IDs (cloid) for reliable order tracking
+    - Atomic TPSL with grouping='normalTpsl'
+    - Dead man's switch (schedule_cancel)
+    - Real-time WebSocket subscriptions (userFills, orderUpdates, clearinghouseState)
+    - Proper decimal rounding per SDK
     """
     
     def __init__(self):
@@ -146,7 +153,7 @@ class HyperAIBot:
         # Exchange components
         self.client: Optional[HyperLiquidClient] = None
         self.websocket: Optional[HLWebSocket] = None
-        self.order_manager: Optional[HLOrderManagerV2] = None  # V2: SDK-optimized
+        self.order_manager: Optional[HLOrderManager] = None
         
         # Strategy Manager (runs all 4 strategies)
         self.strategy: Optional[StrategyManager] = None
@@ -164,8 +171,17 @@ class HyperAIBot:
         self._last_candle_fetch: Optional[datetime] = None
         self._candle_update_pending = False  # Track if we need fresh candles
         
+        # BTC candles for correlation analysis (altcoins only)
+        self._btc_candles_cache: List[Dict[str, Any]] = []
+        self._last_btc_fetch: Optional[datetime] = None
+        
         # Phase 5: Shared indicator calculator (eliminates duplicate calculations)
         self.indicator_calc: Optional[IndicatorCalculator] = None
+        
+        # Phase 5 Part 2: Smart position monitoring (adaptive frequency)
+        self._last_position_check: Optional[datetime] = None
+        self._position_check_interval = 3.0  # Default 3 seconds
+        self._atr_value: Optional[Decimal] = None  # Current ATR for adaptive monitoring
         
         # Error handler
         self.error_handler: Optional[ErrorHandler] = None
@@ -209,42 +225,39 @@ class HyperAIBot:
                 raise ValueError("Missing credentials in .env file")
             
             # Initialize exchange client
-            # Note: HyperLiquid only needs private key, not separate API key
             self.client = HyperLiquidClient(
                 account_address,
-                api_secret,  # Used as both api_key and api_secret parameters
+                api_secret,
                 api_secret,
                 testnet=testnet
             )
             
-            # Initialize WebSocket V2 with account updates (eliminates polling!)
+            # Initialize WebSocket with subscriptions
             self.websocket = HLWebSocket(
-                symbols=[self.symbol],
-                account_address=account_address  # Enable account subscriptions
+                address=account_address,
+                testnet=testnet
             )
-            await self.websocket.start(info_client=self.client.info)  # Pass SDK client for subscriptions
             
             # Link WebSocket to client for optimized get_account_state()
             self.client.websocket = self.websocket
             
-            # Register candle callback for real-time updates (Phase 3)
-            self.websocket.on_candle_callbacks.append(self._on_new_candle)
-            logger.info("📊 Registered real-time candle callback")
+            # Subscribe to user events and market data
+            self.websocket.subscribe_all_mids()  # For price data
+            self.websocket.subscribe_user_fills(self._on_fill)
+            self.websocket.subscribe_order_updates(self._on_order_update)
+            self.websocket.subscribe_candles(self.symbol, "1m", self._on_new_candle)
+            self.websocket.start()
+            logger.info("📊 WebSocket subscriptions active")
             
-            # PHASE 4: Register order update callback for instant notifications
-            self.websocket.on_order_update_callbacks.append(self._on_order_update)
-            logger.info("⚡ Registered real-time order update callback")
-            
-            # Initialize Order Manager V2 (uses SDK bulk_orders)
-            self.order_manager = HLOrderManagerV2(self.client)
+            # Initialize Order Manager
+            self.order_manager = HLOrderManager(self.client)
             
             # Set leverage from MAX_LEVERAGE in .env
             leverage = int(os.getenv('MAX_LEVERAGE', '5'))
-            await self.order_manager.set_leverage(self.symbol, leverage)
+            self.order_manager.set_leverage(self.symbol, leverage)
             logger.info(f"⚙️  Leverage set to {leverage}x for {self.symbol}")
             
-            # Initialize strategy
-            # Initialize strategy manager with all 4 strategies
+            # Initialize strategy manager
             logger.info(f"🎯 Initializing Strategy Manager for {self.symbol}")
             self.strategy = StrategyManager(self.symbol)
             
@@ -272,8 +285,8 @@ class HyperAIBot:
             })()
             
             risk_config = {
-                'max_position_size_pct': float(os.getenv('MAX_POSITION_SIZE_PCT', '70')),
-                'max_positions': int(os.getenv('MAX_POSITIONS', '3')),
+                'max_position_size_pct': float(os.getenv('MAX_POSITION_SIZE_PCT', '55')),
+                'max_positions': int(os.getenv('MAX_POSITIONS', '1')),
                 'max_leverage': int(os.getenv('MAX_LEVERAGE', '5')),
                 'max_daily_loss_pct': float(os.getenv('MAX_DAILY_LOSS_PCT', '5')),
                 'max_drawdown_pct': float(os.getenv('MAX_DRAWDOWN_PCT', '10'))
@@ -281,8 +294,8 @@ class HyperAIBot:
             self.risk_engine = RiskEngine(account_manager_proxy, position_manager_proxy, risk_config)
             
             kill_switch_config = {
-                'daily_loss_trigger_pct': float(os.getenv('MAX_DAILY_LOSS_PCT', '10')),
-                'drawdown_trigger_pct': float(os.getenv('MAX_DRAWDOWN_PCT', '15'))
+                'daily_loss_trigger_pct': float(os.getenv('KILL_SWITCH_DAILY_LOSS_PCT', os.getenv('MAX_DAILY_LOSS_PCT', '5'))),
+                'drawdown_trigger_pct': float(os.getenv('KILL_SWITCH_DRAWDOWN_PCT', os.getenv('MAX_DRAWDOWN_PCT', '10')))
             }
             self.kill_switch = KillSwitch(account_manager_proxy, position_manager_proxy, kill_switch_config)
             
@@ -325,11 +338,15 @@ class HyperAIBot:
                     else:
                         logger.info("📊 DATABASE_URL not set, using JSONL fallback")
                     
-                    # Start auto-trainer background task
-                    logger.info("🤖 Starting ML auto-trainer...")
-                    from ml.auto_trainer import AutoTrainer
-                    self.auto_trainer = AutoTrainer(min_trades_for_retrain=100)
-                    asyncio.create_task(self.auto_trainer.schedule_daily_check(self.telegram_bot))
+                    # Start auto-trainer background task (if enabled)
+                    auto_train_enabled = os.getenv('AUTO_TRAIN_ENABLED', 'true').lower() == 'true'
+                    if auto_train_enabled:
+                        logger.info("🤖 Starting ML auto-trainer...")
+                        from ml.auto_trainer import AutoTrainer
+                        self.auto_trainer = AutoTrainer()  # Uses env vars for config
+                        asyncio.create_task(self.auto_trainer.schedule_daily_check(self.telegram_bot))
+                    else:
+                        logger.info("🤖 ML auto-trainer disabled (set AUTO_TRAIN_ENABLED=true to enable)")
                     
                 except Exception as e:
                     logger.warning(f"⚠️ Telegram bot initialization failed: {e}")
@@ -433,16 +450,82 @@ class HyperAIBot:
         except Exception as e:
             logger.debug(f"Telegram notification failed: {e}")
     
-    async def _monitor_positions(self, account_state: Dict[str, Any]):
+    def _on_fill(self, fill: Dict[str, Any]):
         """
-        Monitor active positions for SL/TP hits and position closures
-        Provides multi-layer safety by tracking:
-        1. Position existence
-        2. Unrealized P&L vs SL/TP levels
-        3. Position size changes
-        4. BACKUP: Auto-close if SL/TP orders failed but price reached target
+        Callback for real-time fill updates
+        Called when orders are filled on the exchange
         """
         try:
+            coin = fill.get('coin', 'UNKNOWN')
+            side = fill.get('side', 'unknown')
+            size = fill.get('sz', 0)
+            price = fill.get('px', 0)
+            fee = fill.get('fee', 0)
+            closed_pnl = fill.get('closedPnl', 0)
+            cloid = fill.get('cloid')
+            
+            # Format log message
+            pnl_str = f" | P&L: ${closed_pnl:+.2f}" if closed_pnl else ""
+            cloid_str = f" [cloid: {cloid}]" if cloid else ""
+            
+            logger.info(f"📥 FILL: {coin} {side.upper()} {size} @ ${price} | Fee: ${fee}{pnl_str}{cloid_str}")
+            
+            # Track fill in order manager if using cloid
+            if cloid and hasattr(self.order_manager, 'track_fill'):
+                self.order_manager.track_fill(cloid, fill)
+            
+            # Send Telegram notification for fills
+            if self.telegram_bot:
+                emoji = "🟢" if side == "B" else "🔴"
+                message = f"{emoji} **FILL**\n\n{coin} {side.upper()} {size} @ ${price}"
+                if closed_pnl:
+                    message += f"\n💰 Closed P&L: ${closed_pnl:+.2f}"
+                asyncio.create_task(self._send_order_notification(message))
+                
+        except Exception as e:
+            logger.error(f"Error in fill callback: {e}")
+    
+    async def _monitor_positions(self, account_state: Dict[str, Any]):
+        """
+        PHASE 5: Smart position monitoring with adaptive frequency
+        
+        Monitors active positions with volatility-based check frequency:
+        - High volatility (ATR > 0.5%): Check every 2s
+        - Medium volatility (ATR 0.2-0.5%): Check every 3s
+        - Low volatility (ATR < 0.2%): Check every 5s
+        
+        Provides multi-layer safety:
+        1. Position existence tracking
+        2. Unrealized P&L vs SL/TP levels
+        3. Dynamic trailing stops
+        4. Position size change detection
+        """
+        try:
+            # PHASE 5: Adaptive monitoring frequency based on volatility
+            now = datetime.now(timezone.utc)
+            
+            # Calculate adaptive check interval based on ATR (volatility)
+            if self._atr_value is not None:
+                atr_pct = self._atr_value
+                if atr_pct > Decimal('0.5'):
+                    # High volatility: Monitor aggressively (every 2s)
+                    self._position_check_interval = 2.0
+                elif atr_pct > Decimal('0.2'):
+                    # Medium volatility: Normal monitoring (every 3s)
+                    self._position_check_interval = 3.0
+                else:
+                    # Low volatility: Relaxed monitoring (every 5s)
+                    self._position_check_interval = 5.0
+            
+            # Skip check if not enough time elapsed (adaptive throttling)
+            if self._last_position_check is not None:
+                time_since_check = (now - self._last_position_check).total_seconds()
+                if time_since_check < self._position_check_interval:
+                    return  # Skip this check - not time yet
+            
+            # Update last check time
+            self._last_position_check = now
+            
             positions = account_state.get('positions', [])
             current_symbols = {pos['symbol'] for pos in positions if float(pos.get('size', 0)) != 0}
             
@@ -489,9 +572,24 @@ class HyperAIBot:
                     new_sl = None
                     new_tp = None
                     
-                    # Get current order IDs from open orders (for validation)
-                    # This ensures we have valid orders to modify
+                    # Store entry price in order manager for trailing calculation
+                    self.order_manager.set_entry_price(symbol, float(entry_price))
                     
+                    # ==================== SCALPING MICRO-TRAIL ====================
+                    # For scalps (small TP targets like 0.3-0.5%), trail immediately
+                    # Activates at just 0.1% profit and trails at 0.08%
+                    
+                    if unrealized_pnl_pct >= 0.5:  # 0.1% PnL = 0.02% price with 5x
+                        # Use the order_manager's trailing stop function
+                        trail_result = self.order_manager.update_trailing_stop(
+                            symbol=symbol,
+                            current_price=float(current_price),
+                            trail_pct=0.08  # 0.08% trailing distance
+                        )
+                        if trail_result:
+                            logger.info(f"⚡ SCALP TRAIL: Moved SL closer at {unrealized_pnl_pct:.2f}% PnL")
+                    
+                    # ==================== SWING TRAILING ====================
                     # **TRAILING STOP-LOSS + TAKE-PROFIT LOGIC** - Lock in profits dynamically!
                     # NOTE: With 5% SL / 15% TP PnL targets and 5x leverage:
                     #   - SL at 5% PnL = 1% price move
@@ -653,6 +751,24 @@ class HyperAIBot:
                             self._candle_update_pending = False
                             logger.debug(f"📊 Updated candles on new bar: {len(candles)} bars")
                     
+                    # WORLD-CLASS: Fetch BTC candles for correlation analysis (altcoins only)
+                    if self.symbol != 'BTC' and hasattr(self.strategy, 'update_btc_candles'):
+                        btc_need_fetch = (
+                            not self._btc_candles_cache or 
+                            not self._last_btc_fetch or
+                            (now - self._last_btc_fetch).total_seconds() > 300  # 5 min refresh
+                        )
+                        if btc_need_fetch:
+                            try:
+                                btc_candles = self.client.get_candles('BTC', '1m', 50)
+                                if btc_candles:
+                                    self._btc_candles_cache = btc_candles
+                                    self._last_btc_fetch = now
+                                    self.strategy.update_btc_candles(btc_candles)
+                                    logger.debug(f"₿ Updated BTC candles: {len(btc_candles)} bars")
+                            except Exception as e:
+                                logger.debug(f"Failed to fetch BTC candles: {e}")
+                    
                     # Always use cached candles for strategies
                     if self._candles_cache:
                         market_data['candles'] = self._candles_cache
@@ -691,6 +807,10 @@ class HyperAIBot:
                         
                         # Add to market_data
                         market_data['indicators'] = shared_indicators
+                        
+                        # PHASE 5 Part 2: Extract ATR for adaptive position monitoring
+                        self._atr_value = shared_indicators.get('atr')
+                        
                         logger.debug("📊 Phase 5: Using shared indicators")
                     
                     # Generate signal from strategy (now uses shared indicators)
@@ -723,13 +843,13 @@ class HyperAIBot:
                                     await asyncio.sleep(1)
                                     continue
                             
-                            # Execute trade
-                            logger.info(f"🎯 Executing {signal['signal_type']} signal")
+                            # Execute trade using V3 atomic TPSL (bulk_orders with grouping='normalTpsl')
+                            logger.info(f"🎯 Executing {signal['signal_type']} signal with ATOMIC TPSL")
                             
-                            result = await self.order_manager.place_market_order(
-                                signal['symbol'],
-                                signal['side'],
-                                Decimal(str(signal['size'])),
+                            result = await self.order_manager.place_market_order_with_stops(
+                                symbol=signal['symbol'],
+                                side=signal['side'].lower(),
+                                size=Decimal(str(signal['size'])),
                                 sl_price=Decimal(str(signal['stop_loss'])),
                                 tp_price=Decimal(str(signal['take_profit']))
                             )
@@ -871,9 +991,9 @@ class HyperAIBot:
             if self.telegram_bot:
                 await self.telegram_bot.stop()
             
-            # Stop websocket
+            # Stop websocket (sync method)
             if self.websocket:
-                await self.websocket.stop()
+                self.websocket.stop()
             
             # Close database connection
             if self.db:

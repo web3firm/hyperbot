@@ -79,6 +79,34 @@ class TradingLogger:
         self.logger.info(f"📝 Trading Logger initialized for {component_name}")
         self.logger.info(f"   Log directory: {self.log_dir}")
     
+    # ==================== PASSTHROUGH METHODS ====================
+    def debug(self, msg: str, *args, **kwargs):
+        """Pass-through to logger.debug"""
+        self.logger.debug(msg, *args, **kwargs)
+    
+    def info(self, msg: str, *args, **kwargs):
+        """Pass-through to logger.info"""
+        self.logger.info(msg, *args, **kwargs)
+    
+    def warning(self, msg: str, *args, **kwargs):
+        """Pass-through to logger.warning"""
+        self.logger.warning(msg, *args, **kwargs)
+    
+    def error(self, msg: str, *args, **kwargs):
+        """Pass-through to logger.error"""
+        self.errors_logged += 1
+        self.logger.error(msg, *args, **kwargs)
+    
+    def critical(self, msg: str, *args, **kwargs):
+        """Pass-through to logger.critical"""
+        self.errors_logged += 1
+        self.logger.critical(msg, *args, **kwargs)
+    
+    def exception(self, msg: str, *args, **kwargs):
+        """Pass-through to logger.exception"""
+        self.errors_logged += 1
+        self.logger.exception(msg, *args, **kwargs)
+    
     def _setup_file_handlers(self):
         """Setup file handlers for different log levels"""
         # Main log file

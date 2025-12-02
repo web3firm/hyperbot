@@ -1,19 +1,23 @@
 """
 Strategy Manager
-Coordinates multiple trading strategies and resolves conflicts
+Coordinates trading strategies - SWING ONLY for sustainable profits
 """
 
+import os
 import logging
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone
 import asyncio
 
-# Import all strategies
-from app.strategies.rule_based.scalping_2pct import ScalpingStrategy2Pct
+# Import strategies - SWING ONLY (scalping removed - fees kill profits)
 from app.strategies.rule_based.mean_reversion import MeanReversionStrategy
 from app.strategies.rule_based.breakout import BreakoutStrategy
 from app.strategies.rule_based.volume_spike import VolumeSpikeStrategy
 from app.strategies.rule_based.swing_trader import SwingTradingStrategy
+from app.strategies.rule_based.world_class_swing import WorldClassSwingStrategy
+
+# Import adaptive components for BTC correlation
+from app.strategies.adaptive import MultiAssetCorrelationAnalyzer
 
 logger = logging.getLogger(__name__)
 
@@ -38,33 +42,64 @@ class StrategyManager:
         self.symbol = symbol
         self.config = config if config is not None else {}
         
-        # Initialize all strategies
-        # ENTERPRISE MODE: Only professional-grade strategies with proven filters
-        self.strategies = {
-            'swing': SwingTradingStrategy(symbol, config),  # Primary: 70% win rate target
-            'momentum': ScalpingStrategy2Pct(symbol, config),  # Secondary: Confirmed scalps only
-            # DISABLED: Low win rate strategies
-            # 'mean_reversion': MeanReversionStrategy(symbol, config),  # 37.5% win rate
-            # 'breakout': BreakoutStrategy(symbol, config),  # No filters
-            # 'volume_spike': VolumeSpikeStrategy(symbol, config)  # Overtrading
-        }
+        # Strategy mode from env
+        strategy_mode = os.getenv('STRATEGY_MODE', 'world_class')
         
-        # Performance tracking
-        self.strategy_stats = {
-            'swing': {'signals': 0, 'trades': 0},
-            'momentum': {'signals': 0, 'trades': 0}
-        }
+        # Initialize strategies based on mode
+        if strategy_mode == 'world_class':
+            # WORLD-CLASS MODE: SWING ONLY - Scalping disabled (fees kill profits)
+            # 
+            # WHY SWING ONLY:
+            # - Scalping: 0.4% target - 0.04% fees = 10% of profit gone
+            # - Swing: 2% target - 0.04% fees = 2% of profit gone
+            # - Fewer trades = fewer fees = more $$ in YOUR pocket
+            #
+            self.strategies = {
+                'world_class_swing': WorldClassSwingStrategy(symbol, config),
+                # 'world_class_scalp': DISABLED - Not profitable after fees
+            }
+            self.strategy_stats = {
+                'world_class_swing': {'signals': 0, 'trades': 0, 'execution_rate': 0},
+            }
+            logger.info(f"🌟 WORLD-CLASS Strategy Manager initialized for {symbol}")
+            logger.info(f"   • World-Class Swing: Adaptive regime, SMC, MTF, OrderFlow")
+            logger.info(f"   💰 SWING ONLY - Quality trades for real profits")
+        
+        elif strategy_mode == 'enterprise':
+            # ENTERPRISE MODE: Swing only
+            self.strategies = {
+                'swing': SwingTradingStrategy(symbol, config),
+            }
+            self.strategy_stats = {
+                'swing': {'signals': 0, 'trades': 0},
+            }
+            logger.info(f"🎯 ENTERPRISE Strategy Manager initialized for {symbol}")
+            logger.info(f"   • Swing Trading: 70% win rate target")
+        
+        else:  # 'all' or default - SWING ONLY
+            # ALL MODE: All SWING strategies active (no scalping)
+            self.strategies = {
+                'world_class_swing': WorldClassSwingStrategy(symbol, config),
+                'swing': SwingTradingStrategy(symbol, config),
+            }
+            self.strategy_stats = {
+                'world_class_swing': {'signals': 0, 'trades': 0},
+                'swing': {'signals': 0, 'trades': 0},
+            }
+            logger.info(f"🚀 FULL Strategy Manager initialized for {symbol}")
+            logger.info(f"   💰 SWING ONLY - No scalping = More profits")
+        
+        # BTC Correlation analyzer (for altcoins)
+        self.correlation_analyzer = MultiAssetCorrelationAnalyzer() if symbol != 'BTC' else None
+        self.btc_candles: List[Dict] = []
         
         # Execution mode
-        self.execution_mode = self.config.get('strategy_mode', 'first_signal')  # or 'round_robin', 'priority'
+        self.execution_mode = self.config.get('strategy_mode', 'first_signal')
         self.last_strategy_used = None
         
-        logger.info(f"🎯 ENTERPRISE Strategy Manager initialized for {symbol}")
-        logger.info(f"   Active Strategies: {len(self.strategies)} (Professional Grade Only)")
-        logger.info(f"   • Swing Trading: 70% win rate target, 5/8 signal score, ADX>25")
-        logger.info(f"   • Momentum/Scalping: 0.3% threshold, trend filter, 2-bar confirmation")
+        logger.info(f"   Active Strategies: {len(self.strategies)}")
         logger.info(f"   Execution Mode: {self.execution_mode}")
-        logger.info(f"   🚫 DISABLED: Mean Reversion, Breakout, Volume Spike (low win rate)")
+        logger.info(f"   BTC Correlation: {'Enabled' if self.correlation_analyzer else 'Disabled (is BTC)'}")
     
     async def generate_signal(self, market_data: Dict[str, Any],
                              account_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -93,9 +128,9 @@ class StrategyManager:
         if not valid_signals:
             return None
         
-        # Select signal based on execution mode
+        # Select signal based on execution mode - SWING ONLY
         if self.execution_mode == 'first_signal':
-            # Return first valid signal (fastest)
+            # Just take the first valid swing signal
             selected_signal = valid_signals[0]
             
         elif self.execution_mode == 'round_robin':
@@ -103,11 +138,39 @@ class StrategyManager:
             selected_signal = self._round_robin_select(valid_signals)
             
         elif self.execution_mode == 'priority':
-            # Priority order: volume_spike > breakout > momentum > mean_reversion
+            # Priority order: world_class first
             selected_signal = self._priority_select(valid_signals)
             
         else:
             selected_signal = valid_signals[0]
+        
+        # BTC Correlation check for altcoins
+        if self.correlation_analyzer and self.btc_candles and selected_signal:
+            asset_candles = market_data.get('candles', [])
+            direction = selected_signal.get('direction')
+            
+            if asset_candles and direction:
+                correlation_result = self.correlation_analyzer.analyze(
+                    self.symbol,
+                    asset_candles,
+                    self.btc_candles,
+                    direction
+                )
+                
+                if not correlation_result.should_trade:
+                    logger.info(f"⚠️ Signal filtered by BTC correlation: {correlation_result.notes}")
+                    return None
+                
+                # Adjust position size based on correlation confidence
+                size_adj = self.correlation_analyzer.get_position_size_adjustment(correlation_result)
+                selected_signal['position_size_pct'] *= float(size_adj)
+                selected_signal['correlation_analysis'] = {
+                    'correlation': float(correlation_result.correlation),
+                    'state': correlation_result.state.value,
+                    'relative_strength': correlation_result.relative_strength.value,
+                    'btc_trend': correlation_result.btc_trend,
+                    'confidence': float(correlation_result.confidence),
+                }
         
         # Update statistics
         strategy_name = selected_signal['strategy']
@@ -119,6 +182,15 @@ class StrategyManager:
         logger.info(f"📊 Signal selected: {strategy_name} ({len(valid_signals)} strategies triggered)")
         
         return selected_signal
+    
+    def update_btc_candles(self, candles: List[Dict]):
+        """
+        Update BTC candles for correlation analysis.
+        
+        Args:
+            candles: BTC price candles
+        """
+        self.btc_candles = candles
     
     async def _run_all_strategies(self, market_data: Dict[str, Any],
                                    account_state: Dict[str, Any]) -> List[Optional[Dict[str, Any]]]:
@@ -186,14 +258,15 @@ class StrategyManager:
     
     def _priority_select(self, signals: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
-        Priority-based selection
+        Priority-based selection - SWING ONLY
         Higher conviction setups get priority
         
         Priority order:
-        1. volume_spike (highest conviction - unusual activity)
-        2. breakout (high conviction - clear momentum)
-        3. momentum (medium conviction - standard scalp)
-        4. mean_reversion (lower conviction - counter-trend)
+        1. world_class_swing (highest - full analysis)
+        2. swing (proven reliable)
+        3. volume_spike (unusual activity)
+        4. breakout (momentum plays)
+        5. mean_reversion (counter-trend)
         
         Args:
             signals: List of valid signals
@@ -201,12 +274,17 @@ class StrategyManager:
         Returns:
             Highest priority signal
         """
-        priority_order = ['VolumeSpikeStrategy', 'BreakoutStrategy', 
-                         'ScalpingStrategy2Pct', 'MeanReversionStrategy']
+        priority_order = [
+            'WorldClassSwing',
+            'SwingTradingStrategy',
+            'VolumeSpikeStrategy',
+            'BreakoutStrategy',
+            'MeanReversionStrategy'
+        ]
         
         for priority_strategy in priority_order:
             for signal in signals:
-                if signal['strategy'] == priority_strategy:
+                if signal.get('strategy') == priority_strategy:
                     return signal
         
         return signals[0]
@@ -257,13 +335,14 @@ class StrategyManager:
         Map strategy class name to internal key
         
         Args:
-            strategy_class_name: Class name (e.g., 'Scalping2PctStrategy')
+            strategy_class_name: Class name
             
         Returns:
-            Internal key (e.g., 'momentum')
+            Internal key
         """
         mapping = {
-            'ScalpingStrategy2Pct': 'momentum',
+            'WorldClassSwing': 'world_class_swing',
+            'SwingTradingStrategy': 'swing',
             'MeanReversionStrategy': 'mean_reversion',
             'BreakoutStrategy': 'breakout',
             'VolumeSpikeStrategy': 'volume_spike'

@@ -1,613 +1,357 @@
 """
-Hyperliquid Order Manager
-Handles order placement, OCO orders, leverage, and position sizing
+HyperLiquid Order Manager - Ultra-Lean SDK Passthrough
+Uses SDK market_open for entry, then order() for TP/SL.
 """
-
-import logging
-from typing import Dict, Any, Optional
-from decimal import Decimal
-from datetime import datetime, timezone
 import asyncio
+import uuid
+from typing import Optional, Dict, Any, Callable, List
+from hyperliquid.utils.types import Cloid
+from app.hl.hl_client import HyperLiquidClient
+from app.utils.trading_logger import TradingLogger
 
-logger = logging.getLogger(__name__)
+logger = TradingLogger("hl_order_manager")
 
 
 class HLOrderManager:
-    """
-    Advanced order management for HyperLiquid
-    Supports OCO, trailing stops, partial exits, timeouts
-    """
+    """Ultra-lean order manager using direct SDK calls."""
     
-    def __init__(self, client):
-        """
-        Initialize order manager
-        
-        Args:
-            client: HyperLiquidClient instance
-        """
+    def __init__(self, client: HyperLiquidClient, on_fill: Optional[Callable] = None):
         self.client = client
-        self.active_orders: Dict[str, Dict] = {}
-        self.oco_orders: Dict[str, Dict] = {}  # OCO pairs (TP/SL)
-        self.order_timeouts: Dict[str, asyncio.Task] = {}  # Timeout tasks
-        self.order_setups: Dict[str, Dict] = {}  # Track setup conditions per order
-        self.default_timeout_seconds = 30  # Default 30s timeout
+        self.exchange = client.exchange
+        self.info = client.info
+        self.address = client.address
+        self.on_fill = on_fill
+        self._loop = asyncio.get_event_loop()
         
-        logger.info("📋 Order Manager initialized with timeout + OCO + setup validation")
+        # Position tracking for trailing stops
+        self.position_orders: Dict[str, Dict[str, Any]] = {}
     
-    async def place_market_order(self, symbol: str, side: str, size: Decimal,
-                                 sl_price: Optional[Decimal] = None,
-                                 tp_price: Optional[Decimal] = None,
-                                 timeout_seconds: Optional[int] = None,
-                                 setup_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _gen_cloid(self) -> Cloid:
+        """Generate unique client order ID (0x + 32 hex chars)."""
+        hex_id = f"0x{uuid.uuid4().hex}"
+        return Cloid.from_str(hex_id)
+    
+    # ==================== MARKET ORDERS ====================
+    def market_open(self, symbol: str, is_buy: bool, size: float, 
+                    slippage: float = 0.01) -> Dict:
         """
-        Place market order with optional SL/TP, timeout, and setup validation
-        
-        Args:
-            symbol: Trading symbol
-            side: 'buy' or 'sell'
-            size: Order size
-            sl_price: Stop loss price
-            tp_price: Take profit price
-            timeout_seconds: Seconds before auto-cancel (default: 30)
-            setup_data: Original setup conditions (for validation)
-            
-        Returns:
-            Order result with OCO orders if applicable
+        Open position with SDK market_open().
+        Uses SDK's built-in slippage handling.
         """
-        # Place main market order
-        result = await self.client.place_order(
-            symbol,
-            side,
-            size,
-            order_type='market'
-        )
+        sz_decimals = self.client.get_sz_decimals(symbol)
+        rounded_size = round(size, sz_decimals)
         
-        if not result.get('success'):
-            return result
-        
-        order_id = result.get('order_id')
-        
-        # Store setup data for validation
-        if order_id and setup_data:
-            self.order_setups[order_id] = {
-                'symbol': symbol,
-                'side': side,
-                'setup_data': setup_data,
-                'created_at': datetime.now(timezone.utc)
-            }
-        
-        # Set up timeout if order ID provided and not immediately filled
-        if order_id and timeout_seconds is not None:
-            timeout = timeout_seconds if timeout_seconds > 0 else self.default_timeout_seconds
-            self._schedule_order_timeout(symbol, order_id, timeout)
-        
-        # Place OCO orders after confirming position exists (with retry logic)
-        if (sl_price or tp_price) and result.get('success'):
-            # Wait briefly for position to be reflected on exchange
-            await asyncio.sleep(1)
-            
-            # Verify position exists before placing SL/TP
-            has_position = await self._verify_position_exists(symbol, size)
-            
-            if has_position:
-                oco_result = await self._place_oco_orders(
-                    symbol,
-                    side,
-                    size,
-                    sl_price,
-                    tp_price
-                )
-                result['oco_orders'] = oco_result
-            else:
-                logger.warning(f"⚠️  Position not confirmed yet, will retry OCO placement...")
-                # Schedule retry after 2 seconds
-                asyncio.create_task(self._retry_oco_placement(symbol, side, size, sl_price, tp_price))
-        
+        result = self.exchange.market_open(symbol, is_buy, rounded_size, slippage)
+        logger.info(f"market_open {symbol} {'BUY' if is_buy else 'SELL'} {rounded_size}: {result}")
         return result
     
-    def _schedule_order_timeout(self, symbol: str, order_id: str, timeout_seconds: int):
+    def market_close(self, symbol: str, slippage: float = 0.01) -> Dict:
+        """Close entire position with SDK market_close()."""
+        result = self.exchange.market_close(symbol, slippage)
+        logger.info(f"market_close {symbol}: {result}")
+        return result
+    
+    # ==================== TP/SL ORDERS ====================
+    def set_tp_sl(self, symbol: str, size: float, is_long: bool,
+                  tp_price: Optional[float] = None,
+                  sl_price: Optional[float] = None) -> List[Dict]:
         """
-        Schedule automatic cancellation of order after timeout
-        
-        Args:
-            symbol: Trading symbol
-            order_id: Order ID to cancel
-            timeout_seconds: Seconds to wait before cancellation
+        Set TP/SL trigger orders for an existing position.
+        These are reduce-only orders on the opposite side.
         """
-        async def timeout_task():
-            try:
-                await asyncio.sleep(timeout_seconds)
-                
-                # Check if order still exists
-                if order_id in self.active_orders:
-                    logger.warning(f"⏰ Order {order_id} timeout reached ({timeout_seconds}s), cancelling...")
-                    success = await self.cancel_order(symbol, order_id)
-                    
-                    if success:
-                        logger.info(f"✅ Order {order_id} cancelled due to timeout")
-                    else:
-                        logger.error(f"❌ Failed to cancel timed-out order {order_id}")
-                    
-                    # Clean up
-                    self.active_orders.pop(order_id, None)
-                    self.order_timeouts.pop(order_id, None)
-                    
-            except asyncio.CancelledError:
-                # Order was filled or manually cancelled, cleanup
-                self.order_timeouts.pop(order_id, None)
-                logger.debug(f"Timeout cancelled for order {order_id} (likely filled)")
-            except Exception as e:
-                logger.error(f"Error in timeout task for {order_id}: {e}")
+        sz_decimals = self.client.get_sz_decimals(symbol)
+        rounded_size = round(size, sz_decimals)
+        results = []
         
-        # Create and store timeout task
-        task = asyncio.create_task(timeout_task())
-        self.order_timeouts[order_id] = task
-        self.active_orders[order_id] = {
-            'symbol': symbol,
-            'created_at': datetime.now(timezone.utc),
-            'timeout_seconds': timeout_seconds
+        # Take Profit (reduce only, opposite side)
+        if tp_price:
+            tp_result = self.exchange.order(
+                coin=symbol,
+                is_buy=not is_long,  # Opposite side to close
+                sz=rounded_size,
+                limit_px=round(tp_price, 6),
+                order_type={"trigger": {
+                    "triggerPx": round(tp_price, 6),
+                    "isMarket": True,
+                    "tpsl": "tp"
+                }},
+                reduce_only=True,
+                cloid=self._gen_cloid(),
+            )
+            logger.info(f"set_tp {symbol} @ {tp_price}: {tp_result}")
+            results.append({'type': 'tp', 'result': tp_result})
+        
+        # Stop Loss (reduce only, opposite side)
+        if sl_price:
+            sl_result = self.exchange.order(
+                coin=symbol,
+                is_buy=not is_long,  # Opposite side to close
+                sz=rounded_size,
+                limit_px=round(sl_price, 6),
+                order_type={"trigger": {
+                    "triggerPx": round(sl_price, 6),
+                    "isMarket": True,
+                    "tpsl": "sl"
+                }},
+                reduce_only=True,
+                cloid=self._gen_cloid(),
+            )
+            logger.info(f"set_sl {symbol} @ {sl_price}: {sl_result}")
+            results.append({'type': 'sl', 'result': sl_result})
+        
+        return results
+    
+    def market_open_with_stops(self, symbol: str, is_buy: bool, size: float,
+                                tp_price: Optional[float] = None,
+                                sl_price: Optional[float] = None,
+                                slippage: float = 0.01) -> Dict:
+        """
+        Open position with market order, then set TP/SL.
+        Two-step process: 1) Market entry, 2) Set TP/SL triggers.
+        """
+        # Step 1: Market entry
+        entry_result = self.market_open(symbol, is_buy, size, slippage)
+        
+        # Check if entry succeeded
+        entry_ok = entry_result.get('status') == 'ok' or 'response' in entry_result
+        if not entry_ok:
+            logger.error(f"Entry failed: {entry_result}")
+            return entry_result
+        
+        # Get actual filled size from response
+        filled_size = size  # Default to requested
+        statuses = entry_result.get('response', {}).get('data', {}).get('statuses', [])
+        if statuses and 'filled' in statuses[0]:
+            filled_info = statuses[0]['filled']
+            filled_size = float(filled_info.get('totalSz', size))
+        
+        logger.info(f"Entry filled: {filled_size} {symbol}")
+        
+        # Step 2: Set TP/SL if entry succeeded and we have prices
+        tpsl_results = []
+        if filled_size > 0 and (tp_price or sl_price):
+            tpsl_results = self.set_tp_sl(symbol, filled_size, is_buy, tp_price, sl_price)
+        
+        # Track position
+        self.position_orders[symbol] = {
+            'size': filled_size,
+            'is_buy': is_buy,
+            'tp_price': tp_price,
+            'sl_price': sl_price,
         }
         
-        logger.debug(f"⏳ Timeout scheduled for order {order_id}: {timeout_seconds}s")
+        return {
+            'status': 'ok',
+            'entry': entry_result,
+            'tpsl': tpsl_results,
+            'filled_size': filled_size,
+        }
     
-    async def _verify_position_exists(self, symbol: str, expected_size: Decimal) -> bool:
+    async def place_market_order_with_stops(self, symbol: str, side: str, size, 
+                                            sl_price=None, tp_price=None) -> Dict:
         """
-        Verify that a position exists on the exchange
-        
-        Args:
-            symbol: Trading symbol
-            expected_size: Expected position size (absolute value)
-            
-        Returns:
-            True if position exists, False otherwise
+        Async wrapper for market_open_with_stops (bot.py compatible).
+        Returns dict with 'success' key for bot.py compatibility.
         """
-        try:
-            account_state = await self.client.get_account_state()
-            positions = account_state.get('positions', [])
-            
-            for pos in positions:
-                if pos['symbol'] == symbol:
-                    pos_size = abs(Decimal(str(pos['size'])))
-                    # Allow small rounding differences
-                    if abs(pos_size - abs(expected_size)) < Decimal('0.01'):
-                        logger.debug(f"✅ Position confirmed: {symbol} size={pos_size}")
-                        return True
-            
-            logger.debug(f"⚠️  Position not found: {symbol}")
-            return False
-            
-        except Exception as e:
-            logger.error(f"Error verifying position: {e}")
-            return False
-    
-    async def _retry_oco_placement(self, symbol: str, side: str, size: Decimal,
-                                   sl_price: Optional[Decimal], 
-                                   tp_price: Optional[Decimal],
-                                   max_retries: int = 3):
-        """
-        Retry OCO order placement with exponential backoff
+        is_buy = side.lower() == 'buy'
+        size_float = float(size)
+        sl_float = float(sl_price) if sl_price else None
+        tp_float = float(tp_price) if tp_price else None
         
-        Args:
-            symbol: Trading symbol
-            side: Original order side
-            size: Position size
-            sl_price: Stop loss price
-            tp_price: Take profit price
-            max_retries: Maximum retry attempts
-        """
-        for attempt in range(max_retries):
-            await asyncio.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s, 4s
-            
-            logger.info(f"🔄 Retry #{attempt + 1} - Attempting OCO placement for {symbol}")
-            
-            has_position = await self._verify_position_exists(symbol, size)
-            
-            if has_position:
-                oco_result = await self._place_oco_orders(symbol, side, size, sl_price, tp_price)
-                
-                if oco_result.get('stop_loss', {}).get('success') or oco_result.get('take_profit', {}).get('success'):
-                    logger.info(f"✅ OCO orders placed successfully on retry #{attempt + 1}")
-                    return
-            else:
-                logger.warning(f"⚠️  Position still not found (retry #{attempt + 1}/{max_retries})")
-        
-        logger.error(f"❌ Failed to place OCO orders after {max_retries} retries for {symbol}")
-    
-    async def _place_oco_orders(self, symbol: str, side: str, size: Decimal,
-                                sl_price: Optional[Decimal], 
-                                tp_price: Optional[Decimal]) -> Dict[str, Any]:
-        """
-        Place OCO (One-Cancels-Other) orders for SL/TP
-        When one fills, the other is automatically cancelled
-        
-        Args:
-            symbol: Trading symbol
-            side: Original order side
-            size: Position size
-            sl_price: Stop loss price
-            tp_price: Take profit price
-            
-        Returns:
-            Dict with SL and TP order results
-        """
-        oco_results = {}
-        order_ids = []
-        
-        # Determine close side (opposite of entry)
-        close_side = 'sell' if side == 'buy' else 'buy'
-        
-        # Place stop loss order (using stop-market for proper stop-loss triggering)
-        if sl_price:
-            try:
-                sl_result = await self.client.place_stop_market_order(
-                    symbol,
-                    close_side,
-                    size,
-                    trigger_price=sl_price,
-                    reduce_only=True
-                )
-                oco_results['stop_loss'] = sl_result
-                
-                if sl_result.get('success') and sl_result.get('order_id'):
-                    sl_order_id = sl_result['order_id']
-                    order_ids.append(sl_order_id)
-                    logger.info(f"📍 Stop Loss placed at {sl_price} (ID: {sl_order_id})")
-                else:
-                    logger.error(f"❌ Stop Loss placement failed: {sl_result.get('error')}")
-            except Exception as e:
-                logger.error(f"❌ Stop Loss error: {e}")
-                oco_results['stop_loss'] = {'success': False, 'error': str(e)}
-        
-        # Place take profit order (limit order with TP flag)
-        if tp_price:
-            try:
-                tp_result = await self.client.place_take_profit_order(
-                    symbol,
-                    close_side,
-                    size,
-                    trigger_price=tp_price,
-                    reduce_only=True
-                )
-                oco_results['take_profit'] = tp_result
-                
-                if tp_result.get('success') and tp_result.get('order_id'):
-                    tp_order_id = tp_result['order_id']
-                    order_ids.append(tp_order_id)
-                    logger.info(f"🎯 Take Profit placed at {tp_price} (ID: {tp_order_id})")
-                else:
-                    logger.error(f"❌ Take Profit placement failed: {tp_result.get('error')}")
-            except Exception as e:
-                logger.error(f"❌ Take Profit error: {e}")
-                oco_results['take_profit'] = {'success': False, 'error': str(e)}
-        
-        # Store SL/TP prices for backup monitoring (even if orders failed)
-        if sl_price or tp_price:
-            if not hasattr(self, 'position_targets'):
-                self.position_targets = {}
-            self.position_targets[symbol] = {
-                'sl_price': sl_price,
-                'tp_price': tp_price,
-                'size': size,
-                'side': side
-            }
-            logger.info(f"💾 Backup targets stored: SL={sl_price}, TP={tp_price}")
-        
-        # Link orders as OCO pair if both succeeded
-        if len(order_ids) == 2:
-            oco_id = f"{symbol}_{int(datetime.now(timezone.utc).timestamp())}"
-            self.oco_orders[oco_id] = {
-                'symbol': symbol,
-                'sl_order_id': order_ids[0],
-                'tp_order_id': order_ids[1],
-                'created_at': datetime.now(timezone.utc)
-            }
-            oco_results['oco_id'] = oco_id
-            logger.info(f"🔗 OCO pair created: {oco_id}")
-        
-        return oco_results
-    
-    async def handle_oco_fill(self, filled_order_id: str):
-        """
-        Handle OCO order fill - cancel the opposite order
-        Call this when an OCO order (SL or TP) fills
-        
-        Args:
-            filled_order_id: Order ID that was filled
-        """
-        # Find OCO pair containing this order
-        for oco_id, oco_data in list(self.oco_orders.items()):
-            sl_id = oco_data['sl_order_id']
-            tp_id = oco_data['tp_order_id']
-            symbol = oco_data['symbol']
-            
-            if filled_order_id == sl_id:
-                # Stop loss hit, cancel take profit
-                logger.info(f"🛑 Stop Loss filled, cancelling Take Profit ({tp_id})")
-                await self.cancel_order(symbol, tp_id)
-                self.oco_orders.pop(oco_id)
-                break
-                
-            elif filled_order_id == tp_id:
-                # Take profit hit, cancel stop loss
-                logger.info(f"✅ Take Profit filled, cancelling Stop Loss ({sl_id})")
-                await self.cancel_order(symbol, sl_id)
-                self.oco_orders.pop(oco_id)
-                break
-    
-    async def place_limit_order(self, symbol: str, side: str, size: Decimal,
-                               price: Decimal, reduce_only: bool = False,
-                               timeout_seconds: Optional[int] = None,
-                               setup_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """
-        Place limit order with optional timeout and setup validation
-        
-        Args:
-            symbol: Trading symbol
-            side: 'buy' or 'sell'
-            size: Order size
-            price: Limit price
-            reduce_only: Whether this is a reduce-only order
-            timeout_seconds: Seconds before auto-cancel (default: 30)
-            setup_data: Original setup conditions (for validation)
-            
-        Returns:
-            Order result
-        """
-        result = await self.client.place_order(
-            symbol,
-            side,
-            size,
-            order_type='limit',
-            price=price,
-            reduce_only=reduce_only
+        result = await self._loop.run_in_executor(
+            None, 
+            lambda: self.market_open_with_stops(symbol, is_buy, size_float, tp_float, sl_float)
         )
         
-        if result.get('success'):
-            order_id = result.get('order_id')
-            
-            # Store setup data
-            if order_id and setup_data:
-                self.order_setups[order_id] = {
-                    'symbol': symbol,
-                    'side': side,
-                    'setup_data': setup_data,
-                    'created_at': datetime.now(timezone.utc)
-                }
-            
-            # Schedule timeout if provided and order not immediately filled
-            if order_id and timeout_seconds is not None:
-                timeout = timeout_seconds if timeout_seconds > 0 else self.default_timeout_seconds
-                self._schedule_order_timeout(symbol, order_id, timeout)
+        # Convert to bot.py expected format
+        success = result.get('status') == 'ok'
+        return {
+            'success': success,
+            'result': result,
+            'error': result.get('error') if not success else None
+        }
+    
+    # ==================== LIMIT ORDERS ====================
+    def limit_order(self, symbol: str, is_buy: bool, size: float, 
+                    price: float, reduce_only: bool = False,
+                    tif: str = "Gtc") -> Dict:
+        """Place limit order using SDK order()."""
+        sz_decimals = self.client.get_sz_decimals(symbol)
+        rounded_size = round(size, sz_decimals)
+        cloid = self._gen_cloid()
         
+        result = self.exchange.order(
+            coin=symbol,
+            is_buy=is_buy,
+            sz=rounded_size,
+            limit_px=round(price, 6),
+            order_type={"limit": {"tif": tif}},
+            reduce_only=reduce_only,
+            cloid=cloid,
+        )
+        logger.info(f"limit_order {symbol} {'BUY' if is_buy else 'SELL'} {rounded_size}@{price}: {result}")
         return result
     
-    async def validate_setup(self, order_id: str, current_market_data: Dict[str, Any]) -> bool:
-        """
-        Validate that setup conditions are still valid before fill
-        
-        Args:
-            order_id: Order ID to validate
-            current_market_data: Current market state
-            
-        Returns:
-            True if setup still valid, False if invalidated
-        """
-        if order_id not in self.order_setups:
-            # No setup data stored, assume valid
-            return True
-        
-        setup_info = self.order_setups[order_id]
-        original_setup = setup_info['setup_data']
-        symbol = setup_info['symbol']
-        side = setup_info['side']
-        
-        # Get current price
-        current_price = Decimal(str(current_market_data.get('price', 0)))
-        if current_price == 0:
-            return True  # Can't validate without price
-        
-        # Check if price moved too far from entry
-        original_price = Decimal(str(original_setup.get('entry_price', 0)))
-        if original_price > 0:
-            price_change_pct = abs((current_price - original_price) / original_price * 100)
-            
-            # If price moved >0.5% away, setup likely invalid
-            if price_change_pct > Decimal('0.5'):
-                logger.warning(f"⚠️ Setup invalidated: price moved {price_change_pct:.2f}% from entry")
-                return False
-        
-        # Check momentum direction still valid (if provided)
-        if 'momentum_pct' in original_setup:
-            original_momentum = Decimal(str(original_setup['momentum_pct']))
-            current_momentum = Decimal(str(current_market_data.get('momentum_pct', 0)))
-            
-            # If momentum reversed significantly, setup invalid
-            if (original_momentum > 0 and current_momentum < -Decimal('0.1')) or \
-               (original_momentum < 0 and current_momentum > Decimal('0.1')):
-                logger.warning(f"⚠️ Setup invalidated: momentum reversed")
-                return False
-        
-        return True
+    # ==================== ORDER MANAGEMENT ====================
+    def modify_order(self, oid: int, symbol: str, is_buy: bool, 
+                     size: float, price: float) -> Dict:
+        """Modify existing order using SDK modify_order()."""
+        result = self.exchange.modify_order(oid, symbol, is_buy, size, price)
+        logger.info(f"modify_order {oid}: {result}")
+        return result
     
-    async def check_and_cancel_invalid_setup(self, order_id: str, 
-                                             current_market_data: Dict[str, Any]) -> bool:
-        """
-        Check if setup is still valid, cancel order if not
-        
-        Args:
-            order_id: Order ID to check
-            current_market_data: Current market state
-            
-        Returns:
-            True if order was cancelled, False if still valid
-        """
-        is_valid = await self.validate_setup(order_id, current_market_data)
-        
-        if not is_valid and order_id in self.order_setups:
-            setup_info = self.order_setups[order_id]
-            symbol = setup_info['symbol']
-            
-            logger.info(f"❌ Cancelling order {order_id} - setup invalidated")
-            await self.cancel_order(symbol, order_id)
-            self.order_setups.pop(order_id, None)
-            return True
-        
-        return False
+    def cancel_order(self, symbol: str, oid: int) -> Dict:
+        """Cancel order by OID using SDK cancel()."""
+        result = self.exchange.cancel(symbol, oid)
+        logger.info(f"cancel {symbol} oid={oid}: {result}")
+        return result
     
-    async def cancel_order(self, symbol: str, order_id: str) -> bool:
-        """
-        Cancel an order and clean up timeout tasks
-        
-        Args:
-            symbol: Trading symbol
-            order_id: Order ID to cancel
-            
-        Returns:
-            True if successful
-        """
-        # Cancel timeout task if exists
-        if order_id in self.order_timeouts:
-            self.order_timeouts[order_id].cancel()
-            self.order_timeouts.pop(order_id, None)
-        
-        # Remove from active tracking
-        self.active_orders.pop(order_id, None)
-        
-        # Cancel actual order
-        return await self.client.cancel_order(symbol, order_id)
+    def cancel_by_cloid(self, symbol: str, cloid: Cloid) -> Dict:
+        """Cancel order by CLOID using SDK cancel_by_cloid()."""
+        result = self.exchange.cancel_by_cloid(symbol, cloid)
+        logger.info(f"cancel_by_cloid {symbol} cloid={cloid}: {result}")
+        return result
     
-    def mark_order_filled(self, order_id: str):
-        """
-        Mark order as filled and clean up timeout + setup data
-        Call this when order fill is detected
+    def cancel_all(self, symbol: Optional[str] = None) -> Dict:
+        """Cancel all open orders, optionally for specific symbol."""
+        orders = self.client.get_open_orders(symbol)
+        if not orders:
+            return {"status": "ok", "cancelled": 0}
         
-        Args:
-            order_id: Order ID that was filled
-        """
-        # Cancel timeout task
-        if order_id in self.order_timeouts:
-            self.order_timeouts[order_id].cancel()
-            self.order_timeouts.pop(order_id, None)
-        
-        # Remove from active tracking
-        self.active_orders.pop(order_id, None)
-        
-        # Remove setup data
-        self.order_setups.pop(order_id, None)
-        
-        logger.debug(f"Order {order_id} marked as filled, all tracking cleared")
+        cancels = [{"coin": o["coin"], "oid": o["oid"]} for o in orders]
+        result = self.exchange.bulk_cancel(cancels)
+        logger.info(f"bulk_cancel {len(cancels)} orders: {result}")
+        return result
     
-    async def modify_order(self, symbol: str, order_id: str, new_price: Decimal) -> bool:
+    # ==================== DEAD MAN'S SWITCH ====================
+    def schedule_cancel(self, seconds: int) -> Dict:
         """
-        Modify order price (cancel and replace)
-        
-        Args:
-            symbol: Trading symbol
-            order_id: Order ID to modify
-            new_price: New price
-            
-        Returns:
-            True if successful
+        Dead man's switch - cancel all orders after N seconds.
+        Use 0 to disable. Maximum 86400 (24h).
         """
-        # Cancel existing order
-        cancelled = await self.cancel_order(symbol, order_id)
-        if not cancelled:
-            return False
-        
-        # Place new order at new price
-        # (Would need to store original order details)
-        logger.info(f"Order {order_id} modified to {new_price}")
-        return True
+        result = self.exchange.schedule_cancel(seconds)
+        logger.info(f"schedule_cancel in {seconds}s: {result}")
+        return result
     
-    async def set_leverage(self, symbol: str, leverage: int) -> bool:
-        """
-        Set leverage for symbol
-        
-        Args:
-            symbol: Trading symbol
-            leverage: Leverage value (1-50)
-            
-        Returns:
-            True if successful
-        """
-        return await self.client.set_leverage(symbol, leverage)
+    # ==================== LEVERAGE ====================
+    def set_leverage(self, symbol: str, leverage: int, is_cross: bool = True) -> Dict:
+        """Set leverage for symbol."""
+        result = self.exchange.update_leverage(leverage, symbol, is_cross)
+        logger.info(f"set_leverage {symbol} {leverage}x {'cross' if is_cross else 'isolated'}: {result}")
+        return result
     
-    def calculate_position_size(self, symbol: str,
-                                account_value: Decimal, 
-                                risk_pct: Decimal,
-                                entry_price: Decimal,
-                                sl_price: Decimal,
-                                leverage: int = 1) -> Decimal:
-        """
-        Calculate position size based on risk parameters
-        
-        Args:
-            symbol: Trading symbol
-            account_value: Account equity
-            risk_pct: Risk percentage (e.g., 1.0 for 1%)
-            entry_price: Entry price
-            sl_price: Stop loss price
-            leverage: Leverage to use
-            
-        Returns:
-            Position size
-        """
-        # Risk amount in USD
-        risk_amount = account_value * (risk_pct / 100)
-        
-        # Price difference to stop loss
-        price_diff = abs(entry_price - sl_price)
-        
-        if price_diff == 0:
-            logger.warning("Stop loss too close to entry, using minimum size")
-            return Decimal('0.01')
-        
-        # Calculate size
-        # risk_amount = size * price_diff
-        size = risk_amount / price_diff
-        
-        # Apply leverage (more size with same risk)
-        size = size * Decimal(str(leverage))
-        
-        # Round to appropriate decimals for this asset
-        size_decimals = self.client.get_size_decimals(symbol)
-        size = round(size, size_decimals)
-        
-        logger.debug(f"Position size calculated: {size} (risk: {risk_pct}%, leverage: {leverage}x)")
-        
-        return size
+    # ==================== QUERY ====================
+    def query_order(self, symbol: str, oid: int) -> Optional[Dict]:
+        """Query order status by OID."""
+        return self.info.query_order_by_oid(self.address, oid)
     
-    def calculate_sl_tp_prices(self, entry_price: Decimal, side: str,
-                               sl_pct: Decimal = Decimal('1.0'),
-                               tp_pct: Decimal = Decimal('2.0')) -> tuple:
+    def query_order_by_cloid(self, symbol: str, cloid: Cloid) -> Optional[Dict]:
+        """Query order status by CLOID."""
+        return self.info.query_order_by_cloid(self.address, cloid)
+    
+    def get_rate_limit(self) -> Dict:
+        """Get current rate limit status."""
+        return self.info.user_rate_limit(self.address)
+    
+    # ==================== TRAILING STOP ====================
+    def update_trailing_stop(self, symbol: str, current_price: float, 
+                             trail_pct: float = 0.15) -> Optional[Dict]:
         """
-        Calculate SL and TP prices based on percentages
+        Update trailing stop for an existing position.
+        
+        Trail Logic:
+        - LONG: If price > entry, move SL up to (current_price * (1 - trail_pct/100))
+        - SHORT: If price < entry, move SL down to (current_price * (1 + trail_pct/100))
         
         Args:
-            entry_price: Entry price
-            side: 'buy' or 'sell'
-            sl_pct: Stop loss percentage (default 1%)
-            tp_pct: Take profit percentage (default 2%)
-            
+            symbol: Trading pair
+            current_price: Current market price
+            trail_pct: Trail distance as percentage (default 0.15%)
+        
         Returns:
-            (sl_price, tp_price)
+            Updated SL order result or None
         """
-        if side == 'buy':
-            # Long position
-            sl_price = entry_price * (1 - sl_pct / 100)
-            tp_price = entry_price * (1 + tp_pct / 100)
+        if symbol not in self.position_orders:
+            return None
+        
+        pos = self.position_orders[symbol]
+        is_long = pos.get('is_buy', True)
+        entry_price = pos.get('entry_price', current_price)
+        current_sl = pos.get('sl_price')
+        size = pos.get('size', 0)
+        
+        if size <= 0:
+            return None
+        
+        # Calculate new trailing SL
+        if is_long:
+            # For longs: trail below current price
+            new_sl = current_price * (1 - trail_pct / 100)
+            
+            # Only update if:
+            # 1. Price is above entry (in profit)
+            # 2. New SL is higher than current SL (tightening)
+            if current_price <= entry_price:
+                return None  # Not in profit yet
+            if current_sl and new_sl <= current_sl:
+                return None  # Would loosen the stop
+                
         else:
-            # Short position
-            sl_price = entry_price * (1 + sl_pct / 100)
-            tp_price = entry_price * (1 - tp_pct / 100)
+            # For shorts: trail above current price
+            new_sl = current_price * (1 + trail_pct / 100)
+            
+            # Only update if:
+            # 1. Price is below entry (in profit)
+            # 2. New SL is lower than current SL (tightening)
+            if current_price >= entry_price:
+                return None  # Not in profit yet
+            if current_sl and new_sl >= current_sl:
+                return None  # Would loosen the stop
         
-        # Round to appropriate decimals based on price
-        price_decimals = self.client.get_price_decimals(entry_price)
-        sl_price = round(sl_price, price_decimals)
-        tp_price = round(tp_price, price_decimals)
-        
-        return (sl_price, tp_price)
+        # Cancel old SL and place new one
+        try:
+            # Cancel all open orders for this symbol (including old SL)
+            self.cancel_all(symbol)
+            
+            # Place new trailing SL
+            sl_result = self.exchange.order(
+                coin=symbol,
+                is_buy=not is_long,
+                sz=size,
+                limit_px=round(new_sl, 6),
+                order_type={"trigger": {
+                    "triggerPx": round(new_sl, 6),
+                    "isMarket": True,
+                    "tpsl": "sl"
+                }},
+                reduce_only=True,
+                cloid=self._gen_cloid(),
+            )
+            
+            # Update tracked SL
+            self.position_orders[symbol]['sl_price'] = new_sl
+            
+            profit_pct = abs(current_price - entry_price) / entry_price * 100
+            locked_pct = abs(new_sl - entry_price) / entry_price * 100
+            
+            logger.info(f"🎯 TRAILING SL: {symbol} {'LONG' if is_long else 'SHORT'}")
+            logger.info(f"   Entry: ${entry_price:.4f} | Current: ${current_price:.4f}")
+            logger.info(f"   Old SL: ${current_sl:.4f} → New SL: ${new_sl:.4f}")
+            logger.info(f"   Profit: {profit_pct:.2f}% | Locked: {locked_pct:.2f}%")
+            
+            return sl_result
+            
+        except Exception as e:
+            logger.error(f"Failed to update trailing stop: {e}")
+            return None
     
-    async def close_position(self, symbol: str) -> Dict[str, Any]:
-        """Close entire position"""
-        return await self.client.close_position(symbol)
+    def set_entry_price(self, symbol: str, entry_price: float):
+        """Set entry price for trailing stop calculation."""
+        if symbol in self.position_orders:
+            self.position_orders[symbol]['entry_price'] = entry_price
+
+
+# Factory function
+def create_order_manager(client: HyperLiquidClient, on_fill: Optional[Callable] = None) -> HLOrderManager:
+    """Create HLOrderManager instance."""
+    return HLOrderManager(client, on_fill)
