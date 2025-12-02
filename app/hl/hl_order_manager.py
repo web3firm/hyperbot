@@ -36,19 +36,63 @@ class HLOrderManager:
                     slippage: float = 0.01) -> Dict:
         """
         Open position with SDK market_open().
-        Uses SDK's built-in slippage handling.
+        Explicitly calculates limit price to avoid SDK caching issues.
         """
         sz_decimals = self.client.get_sz_decimals(symbol)
         rounded_size = round(size, sz_decimals)
         
-        result = self.exchange.market_open(symbol, is_buy, rounded_size, slippage)
-        logger.info(f"market_open {symbol} {'BUY' if is_buy else 'SELL'} {rounded_size}: {result}")
+        # Get current mid price and calculate limit with slippage
+        mid = float(self.info.all_mids().get(symbol, 0))
+        if mid <= 0:
+            logger.error(f"Invalid mid price for {symbol}: {mid}")
+            return {'status': 'error', 'message': 'Invalid mid price'}
+        
+        # Calculate limit price with slippage
+        limit_px = round(mid * (1 + slippage) if is_buy else mid * (1 - slippage), 2)
+        
+        # Use market_open with explicit px
+        result = self.exchange.market_open(symbol, is_buy, rounded_size, px=limit_px)
+        logger.info(f"market_open {symbol} {'BUY' if is_buy else 'SELL'} {rounded_size} @ ${limit_px}: {result}")
         return result
     
     def market_close(self, symbol: str, slippage: float = 0.01) -> Dict:
-        """Close entire position with SDK market_close()."""
-        result = self.exchange.market_close(symbol, slippage)
-        logger.info(f"market_close {symbol}: {result}")
+        """Close entire position with explicit price calculation."""
+        # Get current position size
+        user_state = self.info.user_state(self.address)
+        positions = user_state.get('assetPositions', [])
+        
+        position_size = 0.0
+        is_long = True
+        for p in positions:
+            pos = p.get('position', {})
+            if pos.get('coin') == symbol:
+                position_size = abs(float(pos.get('szi', 0)))
+                is_long = float(pos.get('szi', 0)) > 0
+                break
+        
+        if position_size <= 0:
+            logger.warning(f"No position to close for {symbol}")
+            return {'status': 'ok', 'message': 'No position'}
+        
+        # Get mid and calculate close price (opposite side)
+        mid = float(self.info.all_mids().get(symbol, 0))
+        # For long position, we sell (so price below mid is ok)
+        # For short position, we buy (so price above mid is ok)
+        limit_px = round(mid * (0.99 if is_long else 1.01), 2)
+        
+        # Use order() directly with reduce_only
+        sz_decimals = self.client.get_sz_decimals(symbol)
+        rounded_size = round(position_size, sz_decimals)
+        
+        result = self.exchange.order(
+            name=symbol,
+            is_buy=not is_long,
+            sz=rounded_size,
+            limit_px=limit_px,
+            order_type={"limit": {"tif": "Ioc"}},
+            reduce_only=True,
+        )
+        logger.info(f"market_close {symbol} {rounded_size} @ ${limit_px}: {result}")
         return result
     
     # ==================== TP/SL ORDERS ====================
@@ -66,7 +110,7 @@ class HLOrderManager:
         # Take Profit (reduce only, opposite side)
         if tp_price:
             tp_result = self.exchange.order(
-                coin=symbol,
+                name=symbol,
                 is_buy=not is_long,  # Opposite side to close
                 sz=rounded_size,
                 limit_px=round(tp_price, 6),
@@ -84,7 +128,7 @@ class HLOrderManager:
         # Stop Loss (reduce only, opposite side)
         if sl_price:
             sl_result = self.exchange.order(
-                coin=symbol,
+                name=symbol,
                 is_buy=not is_long,  # Opposite side to close
                 sz=rounded_size,
                 limit_px=round(sl_price, 6),
@@ -181,7 +225,7 @@ class HLOrderManager:
         cloid = self._gen_cloid()
         
         result = self.exchange.order(
-            coin=symbol,
+            name=symbol,
             is_buy=is_buy,
             sz=rounded_size,
             limit_px=round(price, 6),
@@ -315,7 +359,7 @@ class HLOrderManager:
             
             # Place new trailing SL
             sl_result = self.exchange.order(
-                coin=symbol,
+                name=symbol,
                 is_buy=not is_long,
                 sz=size,
                 limit_px=round(new_sl, 6),
