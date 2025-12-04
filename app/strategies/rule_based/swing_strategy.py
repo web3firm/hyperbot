@@ -1,5 +1,5 @@
 """
-World-Class Swing Trading Strategy V2
+Swing Trading Strategy
 Institutional-grade strategy with adaptive risk and smart money concepts.
 
 Features:
@@ -31,7 +31,7 @@ from app.strategies.adaptive.adaptive_risk import AdaptiveRiskManager
 logger = logging.getLogger(__name__)
 
 
-class WorldClassSwingStrategy:
+class SwingStrategy:
     """
     Institutional-Grade Swing Trading Strategy
     
@@ -269,7 +269,7 @@ class WorldClassSwingStrategy:
             'symbol': self.symbol,
             'direction': direction,
             'side': 'buy' if direction == 'long' else 'sell',  # For compatibility
-            'signal_type': f'{direction.upper()} (WorldClassSwing)',
+            'signal_type': f'{direction.upper()} (Swing)',
             'entry_price': float(current_price),
             'stop_loss': risk_levels['stop_loss'],
             'take_profit': risk_levels['take_profit'],
@@ -302,7 +302,7 @@ class WorldClassSwingStrategy:
             
             # Metadata
             'timestamp': datetime.now(timezone.utc).isoformat(),
-            'strategy': 'WorldClassSwing',
+            'strategy': 'Swing',
         }
         
         # Update state
@@ -593,7 +593,7 @@ class WorldClassSwingStrategy:
     def get_statistics(self) -> Dict[str, Any]:
         """Get strategy statistics for Telegram /stats command."""
         return {
-            'strategy': 'WorldClassSwing',
+            'strategy': 'Swing',
             'signals': self.signals_generated,
             'trades': self.signals_generated,  # Approximate
             'current_regime': self.regime_detector.current_regime.value if hasattr(self, 'regime_detector') else 'unknown',
@@ -602,7 +602,7 @@ class WorldClassSwingStrategy:
     def get_status(self) -> Dict[str, Any]:
         """Get strategy status for monitoring."""
         return {
-            'strategy': 'WorldClassSwing',
+            'strategy': 'Swing',
             'symbol': self.symbol,
             'signals_generated': self.signals_generated,
             'current_regime': self.regime_detector.current_regime.value,

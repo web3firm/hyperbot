@@ -13,7 +13,7 @@ import asyncio
 from app.strategies.rule_based.mean_reversion import MeanReversionStrategy
 from app.strategies.rule_based.breakout import BreakoutStrategy
 from app.strategies.rule_based.volume_spike import VolumeSpikeStrategy
-from app.strategies.rule_based.world_class_swing import WorldClassSwingStrategy
+from app.strategies.rule_based.swing_strategy import SwingStrategy
 
 # Import adaptive components for BTC correlation
 from app.strategies.adaptive import MultiAssetCorrelationAnalyzer
@@ -54,34 +54,33 @@ class StrategyManager:
             # - Fewer trades = fewer fees = more $$ in YOUR pocket
             #
             self.strategies = {
-                'world_class_swing': WorldClassSwingStrategy(symbol, config),
-                # 'world_class_scalp': DISABLED - Not profitable after fees
+                'swing': SwingStrategy(symbol, config),
             }
             self.strategy_stats = {
-                'world_class_swing': {'signals': 0, 'trades': 0, 'execution_rate': 0},
+                'swing': {'signals': 0, 'trades': 0, 'execution_rate': 0},
             }
             logger.info(f"🌟 WORLD-CLASS Strategy Manager initialized for {symbol}")
             logger.info(f"   • World-Class Swing: Adaptive regime, SMC, MTF, OrderFlow")
             logger.info(f"   💰 SWING ONLY - Quality trades for real profits")
         
         elif strategy_mode == 'enterprise':
-            # ENTERPRISE MODE: World-class swing only
+            # ENTERPRISE MODE: Swing only
             self.strategies = {
-                'world_class_swing': WorldClassSwingStrategy(symbol, config),
+                'swing': SwingStrategy(symbol, config),
             }
             self.strategy_stats = {
-                'world_class_swing': {'signals': 0, 'trades': 0},
+                'swing': {'signals': 0, 'trades': 0},
             }
             logger.info(f"🎯 ENTERPRISE Strategy Manager initialized for {symbol}")
             logger.info(f"   • World-Class Swing: 70% win rate target")
         
         else:  # 'all' or default - SWING ONLY
-            # ALL MODE: World-class swing only (no duplicates)
+            # ALL MODE: Swing only
             self.strategies = {
-                'world_class_swing': WorldClassSwingStrategy(symbol, config),
+                'swing': SwingStrategy(symbol, config),
             }
             self.strategy_stats = {
-                'world_class_swing': {'signals': 0, 'trades': 0},
+                'swing': {'signals': 0, 'trades': 0},
             }
             logger.info(f"🚀 FULL Strategy Manager initialized for {symbol}")
             logger.info(f"   💰 SWING ONLY - No scalping = More profits")
@@ -259,11 +258,10 @@ class StrategyManager:
         Higher conviction setups get priority
         
         Priority order:
-        1. world_class_swing (highest - full analysis)
-        2. swing (proven reliable)
-        3. volume_spike (unusual activity)
-        4. breakout (momentum plays)
-        5. mean_reversion (counter-trend)
+        1. swing (highest - full analysis with SMC, MTF, regime)
+        2. volume_spike (unusual activity)
+        3. breakout (momentum plays)
+        4. mean_reversion (counter-trend)
         
         Args:
             signals: List of valid signals
@@ -272,8 +270,7 @@ class StrategyManager:
             Highest priority signal
         """
         priority_order = [
-            'WorldClassSwing',
-            'SwingTradingStrategy',
+            'SwingStrategy',
             'VolumeSpikeStrategy',
             'BreakoutStrategy',
             'MeanReversionStrategy'
@@ -338,8 +335,7 @@ class StrategyManager:
             Internal key
         """
         mapping = {
-            'WorldClassSwing': 'world_class_swing',
-            'SwingTradingStrategy': 'swing',
+            'SwingStrategy': 'swing',
             'MeanReversionStrategy': 'mean_reversion',
             'BreakoutStrategy': 'breakout',
             'VolumeSpikeStrategy': 'volume_spike'
