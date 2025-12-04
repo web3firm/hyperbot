@@ -368,7 +368,7 @@ class TelegramBot:
         """Handle /trades command"""
         try:
             # Fetch recent fills from HyperLiquid
-            fills = self.bot.client.info.user_fills(self.bot.client.account_address)
+            fills = self.bot.client.info.user_fills(self.bot.client.address)
             
             if not fills:
                 message = "📭 *NO RECENT TRADES*\n\nNo trades executed yet."
@@ -429,7 +429,7 @@ class TelegramBot:
         """Handle /pnl command"""
         try:
             # Fetch fills from today
-            fills = self.bot.client.info.user_fills(self.bot.client.account_address)
+            fills = self.bot.client.info.user_fills(self.bot.client.address)
             
             now = datetime.now(timezone.utc)
             today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -456,8 +456,8 @@ class TelegramBot:
                     if closed_pnl != 0:
                         weekly_pnl += closed_pnl
             
-            # Calculate percentages
-            account_value = Decimal(str(self.bot.account_state.get('account_value', 1)))
+            # Calculate percentages - use bot.account_value directly
+            account_value = Decimal(str(self.bot.account_value)) if self.bot.account_value else Decimal('1')
             starting_balance = account_value - today_pnl  # Approximate
             
             today_pct = (today_pnl / starting_balance * 100) if starting_balance > 0 else Decimal('0')
@@ -1092,11 +1092,13 @@ class TelegramBot:
     async def _send_status(self, query):
         """Send status via callback"""
         try:
-            account = self.bot.account_state
+            # Use bot.account_value and bot.margin_used directly
+            account_value = float(self.bot.account_value) if self.bot.account_value else 0
+            margin_used = float(self.bot.margin_used) if self.bot.margin_used else 0
             message = (
                 f"📊 *QUICK STATUS*\n\n"
-                f"💰 Balance: ${account.get('account_value', 0):.2f}\n"
-                f"📊 Margin: ${account.get('margin_used', 0):.2f}\n"
+                f"💰 Balance: ${account_value:.2f}\n"
+                f"📊 Margin: ${margin_used:.2f}\n"
                 f"🎯 Status: {'ACTIVE' if self.bot.is_running else 'STOPPED'}\n"
                 f"🔄 Trades: {self.bot.trades_executed}"
             )

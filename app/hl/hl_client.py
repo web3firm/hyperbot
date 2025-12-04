@@ -105,6 +105,30 @@ class HyperLiquidClient:
         return [p["position"] for p in state.get("assetPositions", []) 
                 if float(p["position"].get("szi", 0)) != 0]
     
+    def get_open_positions(self) -> List[Dict]:
+        """
+        Get all open positions with parsed fields for telegram bot compatibility.
+        Returns positions with: symbol, size, side, entry_price, unrealized_pnl, position_value, leverage
+        """
+        raw_positions = self.get_all_positions()
+        parsed = []
+        for p in raw_positions:
+            size = float(p.get("szi", 0))
+            if size != 0:
+                leverage = p.get("leverage", {})
+                leverage_val = float(leverage.get("value", 1)) if isinstance(leverage, dict) else float(leverage or 1)
+                parsed.append({
+                    'symbol': p.get("coin"),
+                    'size': size,
+                    'side': 'long' if size > 0 else 'short',
+                    'entry_price': float(p.get("entryPx", 0)),
+                    'unrealized_pnl': float(p.get("unrealizedPnl", 0)),
+                    'position_value': float(p.get("positionValue", 0)),
+                    'leverage': leverage_val,
+                    'liquidation_price': float(p.get("liquidationPx", 0)) if p.get("liquidationPx") else None,
+                })
+        return parsed
+    
     def get_balance(self) -> float:
         """Get available balance."""
         state = self.info.user_state(self.address)
