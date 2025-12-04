@@ -613,3 +613,61 @@ class WorldClassSwingStrategy:
                 (datetime.now(timezone.utc) - self.last_signal_time).total_seconds()
                 if self.last_signal_time else 0),
         }
+    
+    def record_trade_execution(self, signal: Dict[str, Any], result: Dict[str, Any]):
+        """
+        Record a trade execution for strategy performance tracking.
+        
+        Args:
+            signal: The signal that was executed
+            result: The execution result from the order manager
+        """
+        # Track execution
+        success = result.get('success', False) or result.get('status') == 'ok'
+        
+        if success:
+            logger.info(f"✅ Trade executed for {signal.get('symbol', self.symbol)}: "
+                       f"{signal.get('side', 'unknown').upper()} @ {signal.get('entry_price', 0)}")
+        else:
+            logger.warning(f"⚠️ Trade execution issue for {signal.get('symbol', self.symbol)}: {result}")
+        
+        # Could add more tracking here (trade history, performance metrics, etc.)
+    
+    def revalidate_signal(self, signal: Dict[str, Any], current_price: Decimal) -> bool:
+        """
+        Revalidate a signal before execution.
+        Ensures market conditions haven't changed significantly.
+        
+        Args:
+            signal: The original signal
+            current_price: Current market price
+            
+        Returns:
+            True if signal is still valid, False if conditions changed
+        """
+        entry_price = Decimal(str(signal.get('entry_price', 0)))
+        side = signal.get('side', '').lower()
+        
+        if entry_price <= 0:
+            return True  # Can't validate without entry price
+        
+        # Calculate price deviation
+        deviation_pct = abs(current_price - entry_price) / entry_price * 100
+        
+        # Allow up to 0.5% deviation for swing trades
+        max_deviation = Decimal('0.5')
+        
+        if deviation_pct > max_deviation:
+            logger.warning(f"Signal invalidated: price moved {deviation_pct:.2f}% from entry")
+            return False
+        
+        # For buys, price shouldn't have dropped too much (might indicate reversal)
+        # For sells, price shouldn't have risen too much
+        if side == 'buy' and current_price < entry_price * Decimal('0.995'):
+            logger.warning(f"Buy signal invalidated: price dropped below entry")
+            return False
+        elif side == 'sell' and current_price > entry_price * Decimal('1.005'):
+            logger.warning(f"Sell signal invalidated: price rose above entry")
+            return False
+        
+        return True

@@ -13,7 +13,6 @@ import asyncio
 from app.strategies.rule_based.mean_reversion import MeanReversionStrategy
 from app.strategies.rule_based.breakout import BreakoutStrategy
 from app.strategies.rule_based.volume_spike import VolumeSpikeStrategy
-from app.strategies.rule_based.swing_trader import SwingTradingStrategy
 from app.strategies.rule_based.world_class_swing import WorldClassSwingStrategy
 
 # Import adaptive components for BTC correlation
@@ -66,25 +65,23 @@ class StrategyManager:
             logger.info(f"   💰 SWING ONLY - Quality trades for real profits")
         
         elif strategy_mode == 'enterprise':
-            # ENTERPRISE MODE: Swing only
-            self.strategies = {
-                'swing': SwingTradingStrategy(symbol, config),
-            }
-            self.strategy_stats = {
-                'swing': {'signals': 0, 'trades': 0},
-            }
-            logger.info(f"🎯 ENTERPRISE Strategy Manager initialized for {symbol}")
-            logger.info(f"   • Swing Trading: 70% win rate target")
-        
-        else:  # 'all' or default - SWING ONLY
-            # ALL MODE: All SWING strategies active (no scalping)
+            # ENTERPRISE MODE: World-class swing only
             self.strategies = {
                 'world_class_swing': WorldClassSwingStrategy(symbol, config),
-                'swing': SwingTradingStrategy(symbol, config),
             }
             self.strategy_stats = {
                 'world_class_swing': {'signals': 0, 'trades': 0},
-                'swing': {'signals': 0, 'trades': 0},
+            }
+            logger.info(f"🎯 ENTERPRISE Strategy Manager initialized for {symbol}")
+            logger.info(f"   • World-Class Swing: 70% win rate target")
+        
+        else:  # 'all' or default - SWING ONLY
+            # ALL MODE: World-class swing only (no duplicates)
+            self.strategies = {
+                'world_class_swing': WorldClassSwingStrategy(symbol, config),
+            }
+            self.strategy_stats = {
+                'world_class_swing': {'signals': 0, 'trades': 0},
             }
             logger.info(f"🚀 FULL Strategy Manager initialized for {symbol}")
             logger.info(f"   💰 SWING ONLY - No scalping = More profits")
