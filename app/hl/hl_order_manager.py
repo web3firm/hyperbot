@@ -1,15 +1,28 @@
 """
-HyperLiquid Order Manager - Ultra-Lean SDK Passthrough
-Uses SDK market_open for entry, then order() for TP/SL.
+HyperLiquid Order Manager - Atomic OCO Orders
+Implements proper One-Cancels-Other orders with TP/SL grouping.
+Bypasses SDK limitation that hardcodes grouping to "na".
 """
 import asyncio
 import uuid
-from typing import Optional, Dict, Any, Callable, List
+import time
+from typing import Optional, Dict, Any, Callable, List, Literal
 from hyperliquid.utils.types import Cloid
+from hyperliquid.utils.signing import (
+    sign_l1_action, 
+    get_timestamp_ms,
+    order_request_to_order_wire,
+    float_to_wire,
+    order_type_to_wire,
+)
+from hyperliquid.utils.constants import MAINNET_API_URL
 from app.hl.hl_client import HyperLiquidClient
 from app.utils.trading_logger import TradingLogger
 
 logger = TradingLogger("hl_order_manager")
+
+# Grouping types for HyperLiquid orders
+Grouping = Literal["na", "normalTpsl", "positionTpsl"]
 
 
 class HLOrderManager:
@@ -30,6 +43,197 @@ class HLOrderManager:
         """Generate unique client order ID (0x + 32 hex chars)."""
         hex_id = f"0x{uuid.uuid4().hex}"
         return Cloid.from_str(hex_id)
+    
+    def _order_request_to_wire(self, order: Dict, asset: int) -> Dict:
+        """Convert order request to wire format for API submission."""
+        order_wire = {
+            "a": asset,
+            "b": order["is_buy"],
+            "p": float_to_wire(order["limit_px"]),
+            "s": float_to_wire(order["sz"]),
+            "r": order.get("reduce_only", False),
+            "t": order_type_to_wire(order["order_type"]),
+        }
+        if "cloid" in order and order["cloid"] is not None:
+            order_wire["c"] = order["cloid"].to_raw()
+        return order_wire
+    
+    def _build_order_action(self, order_wires: List[Dict], grouping: Grouping = "na", 
+                            builder: Optional[Dict] = None) -> Dict:
+        """
+        Build order action with custom grouping.
+        This bypasses the SDK's hardcoded "na" grouping.
+        
+        Grouping Types:
+        - "na": No grouping (default SDK behavior)
+        - "normalTpsl": Parent order with TP/SL children (OCO)
+        - "positionTpsl": TP/SL tied to entire position
+        """
+        action = {
+            "type": "order",
+            "orders": order_wires,
+            "grouping": grouping,
+        }
+        if builder:
+            action["builder"] = builder
+        return action
+    
+    def bulk_orders_with_grouping(self, order_requests: List[Dict], 
+                                   grouping: Grouping = "na",
+                                   max_retries: int = 3) -> Dict:
+        """
+        Submit multiple orders with custom grouping for atomic execution.
+        
+        For OCO orders (entry + TP + SL), use grouping="normalTpsl":
+        - Order 0: Entry order (market/limit)
+        - Order 1: Take Profit trigger
+        - Order 2: Stop Loss trigger
+        
+        When entry fills, TP/SL are automatically placed.
+        When either TP or SL triggers, the other is cancelled.
+        
+        Args:
+            order_requests: List of order dicts with coin, is_buy, sz, limit_px, order_type
+            grouping: "na" (independent), "normalTpsl" (OCO), "positionTpsl" (position-based)
+            max_retries: Retry count for transient errors (502, etc.)
+            
+        Returns:
+            API response with order statuses
+        """
+        for attempt in range(max_retries):
+            try:
+                # Convert orders to wire format
+                order_wires = []
+                for order in order_requests:
+                    coin = order["coin"]
+                    asset = self.info.name_to_asset(coin)
+                    wire = self._order_request_to_wire(order, asset)
+                    order_wires.append(wire)
+                
+                # Build action with custom grouping
+                timestamp = get_timestamp_ms()
+                action = self._build_order_action(order_wires, grouping)
+                
+                # Sign and submit
+                is_mainnet = self.exchange.base_url == MAINNET_API_URL
+                signature = sign_l1_action(
+                    self.exchange.wallet,
+                    action,
+                    self.exchange.vault_address,
+                    timestamp,
+                    self.exchange.expires_after,
+                    is_mainnet,
+                )
+                
+                result = self.exchange._post_action(action, signature, timestamp)
+                
+                logger.info(f"bulk_orders_with_grouping({grouping}): {len(order_requests)} orders -> {result}")
+                return result
+                
+            except Exception as e:
+                error_msg = str(e)
+                if "502" in error_msg or "Bad Gateway" in error_msg:
+                    wait_time = 2 ** attempt  # Exponential backoff: 1, 2, 4 seconds
+                    logger.warning(f"502 error, retry {attempt+1}/{max_retries} in {wait_time}s")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error(f"bulk_orders_with_grouping failed: {e}")
+                    return {"status": "error", "error": str(e)}
+        
+        return {"status": "error", "error": "Max retries exceeded (502 errors)"}
+    
+    def atomic_market_entry_with_tpsl(self, symbol: str, is_buy: bool, size: float,
+                                       tp_price: Optional[float] = None,
+                                       sl_price: Optional[float] = None,
+                                       slippage: float = 0.01) -> Dict:
+        """
+        ATOMIC OCO Entry: Market entry + TP + SL in single request.
+        
+        All three orders are submitted together with normalTpsl grouping:
+        - When entry fills, TP/SL become active
+        - When TP triggers, SL is cancelled (and vice versa)
+        
+        This is the proper OCO implementation for HyperLiquid.
+        """
+        sz_decimals = self.client.get_sz_decimals(symbol)
+        rounded_size = round(size, sz_decimals)
+        
+        # Get mid price
+        mid = float(self.info.all_mids().get(symbol, 0))
+        if mid <= 0:
+            logger.error(f"Invalid mid price for {symbol}: {mid}")
+            return {'status': 'error', 'message': 'Invalid mid price'}
+        
+        # Calculate entry limit price with slippage
+        entry_px = round(mid * (1 + slippage) if is_buy else mid * (1 - slippage), 2)
+        
+        orders = []
+        
+        # Order 0: Market entry (IOC with aggressive price = market-like)
+        entry_order = {
+            "coin": symbol,
+            "is_buy": is_buy,
+            "sz": rounded_size,
+            "limit_px": entry_px,
+            "order_type": {"limit": {"tif": "Ioc"}},  # IOC for immediate fill
+            "reduce_only": False,
+            "cloid": self._gen_cloid(),
+        }
+        orders.append(entry_order)
+        
+        # Order 1: Take Profit (reduce-only, opposite side)
+        if tp_price:
+            tp_order = {
+                "coin": symbol,
+                "is_buy": not is_buy,  # Opposite side to close
+                "sz": rounded_size,
+                "limit_px": round(tp_price, 6),
+                "order_type": {"trigger": {
+                    "triggerPx": round(tp_price, 6),
+                    "isMarket": True,
+                    "tpsl": "tp"
+                }},
+                "reduce_only": True,
+                "cloid": self._gen_cloid(),
+            }
+            orders.append(tp_order)
+        
+        # Order 2: Stop Loss (reduce-only, opposite side)
+        if sl_price:
+            sl_order = {
+                "coin": symbol,
+                "is_buy": not is_buy,  # Opposite side to close
+                "sz": rounded_size,
+                "limit_px": round(sl_price, 6),
+                "order_type": {"trigger": {
+                    "triggerPx": round(sl_price, 6),
+                    "isMarket": True,
+                    "tpsl": "sl"
+                }},
+                "reduce_only": True,
+                "cloid": self._gen_cloid(),
+            }
+            orders.append(sl_order)
+        
+        logger.info(f"🎯 ATOMIC OCO: {symbol} {'LONG' if is_buy else 'SHORT'} {rounded_size}")
+        logger.info(f"   Entry: ${entry_px} | TP: ${tp_price} | SL: ${sl_price}")
+        
+        # Submit with normalTpsl grouping for OCO behavior
+        grouping = "normalTpsl" if (tp_price or sl_price) else "na"
+        result = self.bulk_orders_with_grouping(orders, grouping=grouping)
+        
+        # Track position
+        if result.get('status') == 'ok' or 'response' in result:
+            self.position_orders[symbol] = {
+                'size': rounded_size,
+                'is_buy': is_buy,
+                'entry_price': entry_px,
+                'tp_price': tp_price,
+                'sl_price': sl_price,
+            }
+        
+        return result
     
     # ==================== MARKET ORDERS ====================
     def market_open(self, symbol: str, is_buy: bool, size: float, 
@@ -98,13 +302,65 @@ class HLOrderManager:
     # ==================== TP/SL ORDERS ====================
     def set_tp_sl(self, symbol: str, size: float, is_long: bool,
                   tp_price: Optional[float] = None,
-                  sl_price: Optional[float] = None) -> List[Dict]:
+                  sl_price: Optional[float] = None,
+                  use_position_grouping: bool = True) -> List[Dict]:
         """
         Set TP/SL trigger orders for an existing position.
-        These are reduce-only orders on the opposite side.
+        Uses positionTpsl grouping when both TP and SL are provided.
+        
+        Args:
+            symbol: Trading pair
+            size: Position size
+            is_long: True if long position
+            tp_price: Take profit trigger price
+            sl_price: Stop loss trigger price
+            use_position_grouping: Use positionTpsl grouping (OCO behavior)
         """
         sz_decimals = self.client.get_sz_decimals(symbol)
         rounded_size = round(size, sz_decimals)
+        
+        # If both TP and SL, use grouped submission
+        if tp_price and sl_price and use_position_grouping:
+            orders = []
+            
+            # Take Profit
+            tp_order = {
+                "coin": symbol,
+                "is_buy": not is_long,
+                "sz": rounded_size,
+                "limit_px": round(tp_price, 6),
+                "order_type": {"trigger": {
+                    "triggerPx": round(tp_price, 6),
+                    "isMarket": True,
+                    "tpsl": "tp"
+                }},
+                "reduce_only": True,
+                "cloid": self._gen_cloid(),
+            }
+            orders.append(tp_order)
+            
+            # Stop Loss
+            sl_order = {
+                "coin": symbol,
+                "is_buy": not is_long,
+                "sz": rounded_size,
+                "limit_px": round(sl_price, 6),
+                "order_type": {"trigger": {
+                    "triggerPx": round(sl_price, 6),
+                    "isMarket": True,
+                    "tpsl": "sl"
+                }},
+                "reduce_only": True,
+                "cloid": self._gen_cloid(),
+            }
+            orders.append(sl_order)
+            
+            # Submit with positionTpsl grouping (TP/SL for existing position)
+            result = self.bulk_orders_with_grouping(orders, grouping="positionTpsl")
+            logger.info(f"set_tp_sl (grouped) {symbol} TP@{tp_price} SL@{sl_price}: {result}")
+            return [{'type': 'tpsl_grouped', 'result': result}]
+        
+        # Otherwise, submit individually (fallback)
         results = []
         
         # Take Profit (reduce only, opposite side)
@@ -145,14 +401,97 @@ class HLOrderManager:
         
         return results
     
+    def set_position_tpsl(self, symbol: str, 
+                          tp_price: Optional[float] = None,
+                          sl_price: Optional[float] = None) -> Dict:
+        """
+        Set TP/SL for current position (auto-detects size and direction).
+        
+        Convenience method that:
+        1. Fetches current position
+        2. Determines size and direction
+        3. Sets TP/SL with proper grouping
+        
+        Args:
+            symbol: Trading pair
+            tp_price: Take profit trigger price  
+            sl_price: Stop loss trigger price
+            
+        Returns:
+            TP/SL order results
+        """
+        # Get current position
+        user_state = self.info.user_state(self.address)
+        positions = user_state.get('assetPositions', [])
+        
+        position_size = 0.0
+        is_long = True
+        entry_price = 0.0
+        
+        for p in positions:
+            pos = p.get('position', {})
+            if pos.get('coin') == symbol:
+                position_size = abs(float(pos.get('szi', 0)))
+                is_long = float(pos.get('szi', 0)) > 0
+                entry_price = float(pos.get('entryPx', 0))
+                break
+        
+        if position_size <= 0:
+            logger.warning(f"No position to set TP/SL for {symbol}")
+            return {'status': 'error', 'message': 'No position found'}
+        
+        logger.info(f"🎯 Setting TP/SL for {symbol} {'LONG' if is_long else 'SHORT'} {position_size}")
+        logger.info(f"   Entry: ${entry_price} | TP: ${tp_price} | SL: ${sl_price}")
+        
+        # Set TP/SL with proper grouping
+        results = self.set_tp_sl(symbol, position_size, is_long, tp_price, sl_price)
+        
+        # Track position
+        self.position_orders[symbol] = {
+            'size': position_size,
+            'is_buy': is_long,
+            'entry_price': entry_price,
+            'tp_price': tp_price,
+            'sl_price': sl_price,
+        }
+        
+        return {
+            'status': 'ok',
+            'position_size': position_size,
+            'is_long': is_long,
+            'entry_price': entry_price,
+            'tp_price': tp_price, 
+            'sl_price': sl_price,
+            'results': results
+        }
+    
     def market_open_with_stops(self, symbol: str, is_buy: bool, size: float,
                                 tp_price: Optional[float] = None,
                                 sl_price: Optional[float] = None,
-                                slippage: float = 0.01) -> Dict:
+                                slippage: float = 0.01,
+                                use_atomic: bool = True) -> Dict:
         """
-        Open position with market order, then set TP/SL.
-        Two-step process: 1) Market entry, 2) Set TP/SL triggers.
+        Open position with market order and set TP/SL.
+        
+        Args:
+            symbol: Trading pair
+            is_buy: True for long, False for short
+            size: Position size
+            tp_price: Take profit trigger price
+            sl_price: Stop loss trigger price
+            slippage: Max slippage for entry (default 1%)
+            use_atomic: If True, use atomic OCO (all orders in one request)
+                        If False, use two-step (entry first, then TP/SL)
         """
+        if use_atomic and (tp_price or sl_price):
+            # PREFERRED: Atomic OCO - entry + TP + SL in single request
+            return self.atomic_market_entry_with_tpsl(
+                symbol, is_buy, size, tp_price, sl_price, slippage
+            )
+        
+        # Fallback: Two-step process (entry first, then TP/SL)
+        # Used when no TP/SL specified
+        
         # Step 1: Market entry
         entry_result = self.market_open(symbol, is_buy, size, slippage)
         

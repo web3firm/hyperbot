@@ -121,6 +121,14 @@ class HyperLiquidClient:
         mids = self.info.all_mids()
         return float(mids.get(symbol, 0))
     
+    async def get_market_price(self, symbol: str) -> float:
+        """
+        Async get current mid price for telegram bot compatibility.
+        Returns the mid price (average of best bid/ask).
+        """
+        mids = await self._loop.run_in_executor(None, self.info.all_mids)
+        return float(mids.get(symbol, 0))
+    
     def get_open_orders(self, symbol: Optional[str] = None) -> List[Dict]:
         """Get open orders, optionally filtered by symbol."""
         orders = self.info.open_orders(self.address)
@@ -203,7 +211,7 @@ class HyperLiquidClient:
     
     async def get_account_state(self) -> Dict[str, Any]:
         """
-        Get comprehensive account state for bot.py compatibility.
+        Get comprehensive account state for bot.py and telegram_bot.py compatibility.
         Returns dict with account_value, margin_used, positions, etc.
         """
         # Try WebSocket cache first for speed
@@ -216,19 +224,26 @@ class HyperLiquidClient:
         state = await self._loop.run_in_executor(None, self.info.user_state, self.address)
         margin = state.get("marginSummary", {})
         
-        # Parse positions
+        # Parse positions with all fields needed by telegram_bot.py
         positions = []
         for pos in state.get("assetPositions", []):
             p = pos.get("position", {})
             size = float(p.get("szi", 0))
             if size != 0:
+                position_value = float(p.get("positionValue", 0))
+                leverage = p.get("leverage", {})
+                leverage_val = float(leverage.get("value", 1)) if isinstance(leverage, dict) else float(leverage or 1)
+                
                 positions.append({
                     'symbol': p.get("coin"),
                     'size': size,
+                    'side': 'long' if size > 0 else 'short',  # Added for telegram_bot
                     'entry_price': float(p.get("entryPx", 0)),
-                    'mark_price': float(p.get("positionValue", 0)) / abs(size) if size else 0,
+                    'mark_price': position_value / abs(size) if size else 0,
                     'unrealized_pnl': float(p.get("unrealizedPnl", 0)),
-                    'leverage': float(p.get("leverage", {}).get("value", 1)),
+                    'position_value': position_value,  # Added for telegram_bot
+                    'leverage': leverage_val,
+                    'liquidation_price': float(p.get("liquidationPx", 0)) if p.get("liquidationPx") else None,
                 })
         
         return {
