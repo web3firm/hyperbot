@@ -1336,13 +1336,13 @@ class TelegramBot:
             symbol = context.args[0].upper()
             sl_price = float(context.args[1])
             
-            # Use order manager to set SL
-            result = await self.bot.order_manager.set_position_tpsl(
+            # Use order manager to set SL (sync method)
+            result = self.bot.order_manager.set_position_tpsl(
                 symbol=symbol,
                 sl_price=sl_price
             )
             
-            if result.get('success'):
+            if result.get('status') == 'ok':
                 await update.message.reply_text(
                     f"✅ *STOP LOSS SET*\n\n"
                     f"📊 {symbol}\n"
@@ -1375,13 +1375,13 @@ class TelegramBot:
             symbol = context.args[0].upper()
             tp_price = float(context.args[1])
             
-            # Use order manager to set TP
-            result = await self.bot.order_manager.set_position_tpsl(
+            # Use order manager to set TP (sync method)
+            result = self.bot.order_manager.set_position_tpsl(
                 symbol=symbol,
                 tp_price=tp_price
             )
             
-            if result.get('success'):
+            if result.get('status') == 'ok':
                 await update.message.reply_text(
                     f"✅ *TAKE PROFIT SET*\n\n"
                     f"📊 {symbol}\n"
@@ -1403,44 +1403,88 @@ class TelegramBot:
     async def _cmd_autotpsl(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /autotpsl command - Auto-set ATR-based TP/SL for a position"""
         try:
-            if not hasattr(self.bot, 'position_manager') or not self.bot.position_manager:
-                await update.message.reply_text("⚠️ Position Manager not initialized")
-                return
-            
             # Get symbol from args or use default
             symbol = context.args[0].upper() if context.args else self.bot.symbol
             
             # Get current candles for ATR calculation
             candles = self.bot._candles_cache if hasattr(self.bot, '_candles_cache') else []
             
-            if not candles:
-                await update.message.reply_text("❌ No candle data available for ATR calculation")
+            if not candles or len(candles) < 14:
+                await update.message.reply_text("❌ Not enough candle data for ATR calculation (need at least 14)")
                 return
             
-            # Get current position
-            positions = await self.bot.client.get_open_positions()
+            # Get current position (sync method)
+            positions = self.bot.client.get_open_positions()
             position = next((p for p in positions if p.get('symbol') == symbol), None)
             
             if not position:
                 await update.message.reply_text(f"❌ No open position for {symbol}")
                 return
             
-            # Auto-set TP/SL using Position Manager
-            pm = self.bot.position_manager
-            result = await pm.auto_set_tpsl(symbol, position, candles)
+            # Calculate ATR for TP/SL
+            from decimal import Decimal
             
-            if result.get('success'):
+            # Get price data for ATR
+            highs = [float(c['high']) for c in candles[-14:]]
+            lows = [float(c['low']) for c in candles[-14:]]
+            closes = [float(c['close']) for c in candles[-15:-1]]  # Previous closes
+            
+            # Calculate True Range
+            true_ranges = []
+            for i in range(len(highs)):
+                if i < len(closes):
+                    tr = max(
+                        highs[i] - lows[i],
+                        abs(highs[i] - closes[i]),
+                        abs(lows[i] - closes[i])
+                    )
+                else:
+                    tr = highs[i] - lows[i]
+                true_ranges.append(tr)
+            
+            atr = sum(true_ranges) / len(true_ranges) if true_ranges else 0
+            
+            if atr <= 0:
+                await update.message.reply_text("❌ Could not calculate ATR")
+                return
+            
+            # Calculate TP/SL prices
+            entry_price = position['entry_price']
+            is_long = position['side'] == 'long'
+            
+            # Use 2x ATR for SL, 4x ATR for TP (2:1 R:R)
+            sl_distance = atr * 2
+            tp_distance = atr * 4
+            
+            if is_long:
+                sl_price = entry_price - sl_distance
+                tp_price = entry_price + tp_distance
+            else:
+                sl_price = entry_price + sl_distance
+                tp_price = entry_price - tp_distance
+            
+            # Set TP/SL using order manager (sync method)
+            result = self.bot.order_manager.set_position_tpsl(
+                symbol=symbol,
+                tp_price=tp_price,
+                sl_price=sl_price
+            )
+            
+            if result.get('status') == 'ok':
                 await update.message.reply_text(
                     f"✅ *AUTO TP/SL SET*\n\n"
-                    f"📊 {symbol}\n"
-                    f"🛑 SL: ${result.get('sl_price', 0):.4f}\n"
-                    f"🎯 TP: ${result.get('tp_price', 0):.4f}\n\n"
-                    f"📐 Based on {result.get('atr_multiplier', 2)}x ATR",
+                    f"📊 {symbol} ({position['side'].upper()})\n"
+                    f"💵 Entry: ${entry_price:.4f}\n"
+                    f"🛑 SL: ${sl_price:.4f}\n"
+                    f"🎯 TP: ${tp_price:.4f}\n\n"
+                    f"📐 ATR: ${atr:.4f}\n"
+                    f"📏 SL Distance: 2x ATR\n"
+                    f"📏 TP Distance: 4x ATR (2:1 R:R)",
                     parse_mode='Markdown'
                 )
             else:
                 await update.message.reply_text(
-                    f"❌ Failed to auto-set TP/SL: {result.get('error')}",
+                    f"❌ Failed to set TP/SL: {result.get('message', 'Unknown error')}",
                     parse_mode='Markdown'
                 )
                 

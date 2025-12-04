@@ -108,20 +108,32 @@ class HyperLiquidClient:
     def get_open_positions(self) -> List[Dict]:
         """
         Get all open positions with parsed fields for telegram bot compatibility.
-        Returns positions with: symbol, size, side, entry_price, unrealized_pnl, position_value, leverage
+        Returns positions with: symbol, size, side, entry_price, unrealized_pnl, position_value, leverage, mark_price
         """
         raw_positions = self.get_all_positions()
+        
+        # Get current mid prices for mark price
+        try:
+            mids = self.info.all_mids()
+        except:
+            mids = {}
+        
         parsed = []
         for p in raw_positions:
             size = float(p.get("szi", 0))
             if size != 0:
                 leverage = p.get("leverage", {})
                 leverage_val = float(leverage.get("value", 1)) if isinstance(leverage, dict) else float(leverage or 1)
+                symbol = p.get("coin")
+                entry_price = float(p.get("entryPx", 0))
+                mark_price = float(mids.get(symbol, entry_price))  # Use mid price or fallback to entry
+                
                 parsed.append({
-                    'symbol': p.get("coin"),
+                    'symbol': symbol,
                     'size': size,
                     'side': 'long' if size > 0 else 'short',
-                    'entry_price': float(p.get("entryPx", 0)),
+                    'entry_price': entry_price,
+                    'mark_price': mark_price,
                     'unrealized_pnl': float(p.get("unrealizedPnl", 0)),
                     'position_value': float(p.get("positionValue", 0)),
                     'leverage': leverage_val,

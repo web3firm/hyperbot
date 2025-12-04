@@ -732,6 +732,78 @@ class HLOrderManager:
         """Set entry price for trailing stop calculation."""
         if symbol in self.position_orders:
             self.position_orders[symbol]['entry_price'] = entry_price
+    
+    async def modify_stops(self, symbol: str, new_sl: Optional[float] = None, 
+                           new_tp: Optional[float] = None) -> Dict:
+        """
+        Modify existing TP/SL orders for a position.
+        
+        Args:
+            symbol: Trading pair
+            new_sl: New stop loss price (None to keep current)
+            new_tp: New take profit price (None to keep current)
+            
+        Returns:
+            Dict with success status and modified orders
+        """
+        try:
+            if symbol not in self.position_orders:
+                return {'success': False, 'error': 'No position tracked for symbol'}
+            
+            pos = self.position_orders[symbol]
+            is_long = pos.get('is_buy', True)
+            size = pos.get('size', 0)
+            
+            if size <= 0:
+                return {'success': False, 'error': 'No position size'}
+            
+            modified = []
+            
+            # Cancel existing orders first
+            self.cancel_all(symbol)
+            
+            # Set new TP if provided
+            if new_tp is not None:
+                tp_result = self.exchange.order(
+                    name=symbol,
+                    is_buy=not is_long,
+                    sz=size,
+                    limit_px=round(new_tp, 6),
+                    order_type={"trigger": {
+                        "triggerPx": round(new_tp, 6),
+                        "isMarket": True,
+                        "tpsl": "tp"
+                    }},
+                    reduce_only=True,
+                    cloid=self._gen_cloid(),
+                )
+                self.position_orders[symbol]['tp_price'] = new_tp
+                modified.append(f"TP=${new_tp:.4f}")
+            
+            # Set new SL if provided
+            if new_sl is not None:
+                sl_result = self.exchange.order(
+                    name=symbol,
+                    is_buy=not is_long,
+                    sz=size,
+                    limit_px=round(new_sl, 6),
+                    order_type={"trigger": {
+                        "triggerPx": round(new_sl, 6),
+                        "isMarket": True,
+                        "tpsl": "sl"
+                    }},
+                    reduce_only=True,
+                    cloid=self._gen_cloid(),
+                )
+                self.position_orders[symbol]['sl_price'] = new_sl
+                modified.append(f"SL=${new_sl:.4f}")
+            
+            logger.info(f"✅ Modified stops for {symbol}: {', '.join(modified)}")
+            return {'success': True, 'modified': modified}
+            
+        except Exception as e:
+            logger.error(f"Failed to modify stops: {e}")
+            return {'success': False, 'error': str(e)}
 
 
 # Factory function
