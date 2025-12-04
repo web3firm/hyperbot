@@ -76,6 +76,9 @@ from app.hl.hl_order_manager import HLOrderManager
 # Import strategies
 from app.strategies.strategy_manager import StrategyManager
 
+# Import Position Manager (manages manual orders + early exit)
+from app.portfolio.position_manager import PositionManager
+
 # Import risk management (consolidated in app/)
 from app.risk.risk_engine import RiskEngine
 from app.risk.kill_switch import KillSwitch
@@ -157,6 +160,9 @@ class HyperAIBot:
         
         # Strategy Manager (runs all 4 strategies)
         self.strategy: Optional[StrategyManager] = None
+        
+        # Position Manager (manages manual orders + early exit)
+        self.position_manager: Optional[PositionManager] = None
         
         # Risk management
         self.risk_engine: Optional[RiskEngine] = None
@@ -264,6 +270,22 @@ class HyperAIBot:
             # Phase 5: Initialize shared indicator calculator
             self.indicator_calc = IndicatorCalculator()
             logger.info("📊 Phase 5: Shared indicator calculator initialized")
+            
+            # Phase 6: Initialize Position Manager (manages manual orders + early exit)
+            position_manager_config = {
+                'check_interval_seconds': 5,  # Check every 5 seconds
+                'auto_set_tpsl': True,  # Auto-set TP/SL for manual orders
+                'enable_early_exit': True,  # Early exit on failed setups
+                'health_threshold': 40,  # Exit if setup health drops below 40%
+                'atr_sl_multiplier': 2.0,  # SL = 2x ATR
+                'atr_tp_multiplier': 4.0,  # TP = 4x ATR (2:1 R:R)
+            }
+            self.position_manager = PositionManager(
+                hl_client=self.client,
+                order_manager=self.order_manager,
+                config=position_manager_config
+            )
+            logger.info("🎯 Phase 6: Position Manager initialized (manual order management + early exit)")
             
             # Get initial account state
             await self.update_account_state()
@@ -682,6 +704,14 @@ class HyperAIBot:
         self.start_time = datetime.now(timezone.utc)
         loop_count = 0
         
+        # Start Position Manager monitoring loop (runs in parallel)
+        position_manager_task = None
+        if self.position_manager:
+            logger.info("🔄 Starting Position Manager monitoring loop...")
+            position_manager_task = asyncio.create_task(
+                self._run_position_manager_loop()
+            )
+        
         try:
             while not shutdown_event.is_set() and self.is_running:
                 loop_count += 1
@@ -900,7 +930,55 @@ class HyperAIBot:
                     await asyncio.sleep(5)
         
         finally:
+            # Stop Position Manager monitoring
+            if position_manager_task:
+                position_manager_task.cancel()
+                try:
+                    await position_manager_task
+                except asyncio.CancelledError:
+                    pass
             await self.shutdown()
+    
+    async def _run_position_manager_loop(self):
+        """
+        Run Position Manager in parallel with trading loop.
+        Handles:
+        - Detection and management of manual positions
+        - Auto TP/SL setting for unmanaged positions
+        - Early exit on failed setups
+        """
+        logger.info("🔄 Position Manager loop started")
+        
+        try:
+            while not shutdown_event.is_set() and self.is_running:
+                try:
+                    # Skip if paused
+                    if self.is_paused:
+                        await asyncio.sleep(5)
+                        continue
+                    
+                    # Get current candles for indicator calculation
+                    candles = self._candles_cache if self._candles_cache else []
+                    
+                    # Run position manager check
+                    await self.position_manager.check_positions(
+                        candles=candles,
+                        telegram_bot=self.telegram_bot
+                    )
+                    
+                    # Use adaptive interval from position manager
+                    await asyncio.sleep(self.position_manager.config.get('check_interval_seconds', 5))
+                    
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error(f"Position Manager error: {e}", exc_info=True)
+                    await asyncio.sleep(10)  # Back off on error
+                    
+        except asyncio.CancelledError:
+            logger.info("🔄 Position Manager loop cancelled")
+        
+        logger.info("🔄 Position Manager loop stopped")
     
     async def log_trade_for_ai(self, signal: Dict, result: Dict, market_data: Dict):
         """Log trade data for AI training"""

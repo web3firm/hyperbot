@@ -149,6 +149,12 @@ class TelegramBot:
             self.application.add_handler(CommandHandler("regime", self._cmd_regime))
             self.application.add_handler(CommandHandler("session", self._cmd_session))
             
+            # Position Management commands (Phase 6)
+            self.application.add_handler(CommandHandler("managed", self._cmd_managed))
+            self.application.add_handler(CommandHandler("setsl", self._cmd_setsl))
+            self.application.add_handler(CommandHandler("settp", self._cmd_settp))
+            self.application.add_handler(CommandHandler("autotpsl", self._cmd_autotpsl))
+            
             # Callback handler for inline buttons
             self.application.add_handler(CallbackQueryHandler(self._handle_callback))
             
@@ -665,6 +671,11 @@ class TelegramBot:
                 "<b>📉 Position Control:</b>\n"
                 "/close [symbol] - Close specific position\n"
                 "/closeall - Close all positions (⚠️ careful!)\n\n"
+                "<b>🎯 Position Management (Phase 6):</b>\n"
+                "/managed - Show managed positions\n"
+                "/setsl [symbol] [price] - Set stop loss\n"
+                "/settp [symbol] [price] - Set take profit\n"
+                "/autotpsl [symbol] - Auto-set ATR-based TP/SL\n\n"
                 "<b>📊 Analytics:</b>\n"
                 "/analytics - Full performance dashboard\n"
                 "/analytics daily - Last 30 days breakdown\n"
@@ -677,6 +688,8 @@ class TelegramBot:
                 "🛑 STOP - Pause trading\n\n"
                 "<b>ℹ️ Notes:</b>\n"
                 "• Real-time signal notifications\n"
+                "• Auto TP/SL for manual positions\n"
+                "• Early exit on failed setups\n"
                 "• PnL warnings at key levels\n"
                 "• Hourly status updates (configurable)\n\n"
                 "🎯 Target: 70% win rate | 3.5:1 R:R"
@@ -1257,6 +1270,184 @@ class TelegramBot:
                 parse_mode='Markdown'
             )
     
+    # ==================== POSITION MANAGEMENT COMMANDS (Phase 6) ====================
+    
+    async def _cmd_managed(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /managed command - Show managed positions"""
+        try:
+            if not hasattr(self.bot, 'position_manager') or not self.bot.position_manager:
+                await update.message.reply_text("⚠️ Position Manager not initialized")
+                return
+            
+            pm = self.bot.position_manager
+            managed = pm.managed_positions
+            
+            if not managed:
+                await update.message.reply_text(
+                    "📊 *MANAGED POSITIONS*\n\n"
+                    "No positions currently being managed.\n"
+                    "Open a manual position and the bot will auto-detect it!",
+                    parse_mode='Markdown'
+                )
+                return
+            
+            lines = ["📊 *MANAGED POSITIONS*\n"]
+            
+            for symbol, pos in managed.items():
+                source = "🤖 Bot" if pos.source == 'bot' else "👤 Manual"
+                health = pos.setup_health if pos.setup_health else 100
+                health_emoji = "🟢" if health >= 70 else ("🟡" if health >= 40 else "🔴")
+                
+                side_emoji = "🟢" if pos.side.lower() == 'long' else "🔴"
+                
+                lines.append(f"\n{side_emoji} *{symbol}* ({source})")
+                lines.append(f"   Entry: ${pos.entry_price:.4f}")
+                lines.append(f"   Size: {pos.size:.4f}")
+                
+                if pos.stop_loss:
+                    lines.append(f"   🛑 SL: ${pos.stop_loss:.4f}")
+                else:
+                    lines.append(f"   🛑 SL: Not Set ⚠️")
+                    
+                if pos.take_profit:
+                    lines.append(f"   🎯 TP: ${pos.take_profit:.4f}")
+                else:
+                    lines.append(f"   🎯 TP: Not Set ⚠️")
+                
+                lines.append(f"   {health_emoji} Health: {health:.0f}%")
+            
+            await update.message.reply_text("\n".join(lines), parse_mode='Markdown')
+            
+        except Exception as e:
+            logger.error(f"Managed command error: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error: {str(e)}")
+    
+    async def _cmd_setsl(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /setsl command - Set stop loss for a position"""
+        try:
+            if not context.args or len(context.args) < 2:
+                await update.message.reply_text(
+                    "Usage: /setsl <symbol> <price>\n"
+                    "Example: /setsl SOL 145.50",
+                    parse_mode='Markdown'
+                )
+                return
+            
+            symbol = context.args[0].upper()
+            sl_price = float(context.args[1])
+            
+            # Use order manager to set SL
+            result = await self.bot.order_manager.set_position_tpsl(
+                symbol=symbol,
+                sl_price=sl_price
+            )
+            
+            if result.get('success'):
+                await update.message.reply_text(
+                    f"✅ *STOP LOSS SET*\n\n"
+                    f"📊 {symbol}\n"
+                    f"🛑 SL: ${sl_price:.4f}",
+                    parse_mode='Markdown'
+                )
+            else:
+                await update.message.reply_text(
+                    f"❌ Failed to set SL: {result.get('error')}",
+                    parse_mode='Markdown'
+                )
+                
+        except ValueError:
+            await update.message.reply_text("❌ Invalid price format")
+        except Exception as e:
+            logger.error(f"SetSL command error: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error: {str(e)}")
+    
+    async def _cmd_settp(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /settp command - Set take profit for a position"""
+        try:
+            if not context.args or len(context.args) < 2:
+                await update.message.reply_text(
+                    "Usage: /settp <symbol> <price>\n"
+                    "Example: /settp SOL 160.00",
+                    parse_mode='Markdown'
+                )
+                return
+            
+            symbol = context.args[0].upper()
+            tp_price = float(context.args[1])
+            
+            # Use order manager to set TP
+            result = await self.bot.order_manager.set_position_tpsl(
+                symbol=symbol,
+                tp_price=tp_price
+            )
+            
+            if result.get('success'):
+                await update.message.reply_text(
+                    f"✅ *TAKE PROFIT SET*\n\n"
+                    f"📊 {symbol}\n"
+                    f"🎯 TP: ${tp_price:.4f}",
+                    parse_mode='Markdown'
+                )
+            else:
+                await update.message.reply_text(
+                    f"❌ Failed to set TP: {result.get('error')}",
+                    parse_mode='Markdown'
+                )
+                
+        except ValueError:
+            await update.message.reply_text("❌ Invalid price format")
+        except Exception as e:
+            logger.error(f"SetTP command error: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error: {str(e)}")
+    
+    async def _cmd_autotpsl(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /autotpsl command - Auto-set ATR-based TP/SL for a position"""
+        try:
+            if not hasattr(self.bot, 'position_manager') or not self.bot.position_manager:
+                await update.message.reply_text("⚠️ Position Manager not initialized")
+                return
+            
+            # Get symbol from args or use default
+            symbol = context.args[0].upper() if context.args else self.bot.symbol
+            
+            # Get current candles for ATR calculation
+            candles = self.bot._candles_cache if hasattr(self.bot, '_candles_cache') else []
+            
+            if not candles:
+                await update.message.reply_text("❌ No candle data available for ATR calculation")
+                return
+            
+            # Get current position
+            positions = await self.bot.client.get_open_positions()
+            position = next((p for p in positions if p.get('symbol') == symbol), None)
+            
+            if not position:
+                await update.message.reply_text(f"❌ No open position for {symbol}")
+                return
+            
+            # Auto-set TP/SL using Position Manager
+            pm = self.bot.position_manager
+            result = await pm.auto_set_tpsl(symbol, position, candles)
+            
+            if result.get('success'):
+                await update.message.reply_text(
+                    f"✅ *AUTO TP/SL SET*\n\n"
+                    f"📊 {symbol}\n"
+                    f"🛑 SL: ${result.get('sl_price', 0):.4f}\n"
+                    f"🎯 TP: ${result.get('tp_price', 0):.4f}\n\n"
+                    f"📐 Based on {result.get('atr_multiplier', 2)}x ATR",
+                    parse_mode='Markdown'
+                )
+            else:
+                await update.message.reply_text(
+                    f"❌ Failed to auto-set TP/SL: {result.get('error')}",
+                    parse_mode='Markdown'
+                )
+                
+        except Exception as e:
+            logger.error(f"AutoTPSL command error: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error: {str(e)}")
+
     async def notify_fill(self, fill_type: str, symbol: str, side: str, price: float, size: float):
         """Send notification for order fill"""
         emoji = "✅" if fill_type == 'entry' else "🏁"
@@ -1307,3 +1498,45 @@ class TelegramBot:
         """Send emergency notification"""
         alert = f"🚨 *EMERGENCY ALERT*\n\n{message}"
         await self.send_message(alert)
+    
+    async def notify_early_exit(self, symbol: str, side: str, reason: str, pnl: float = None, health: int = None):
+        """Send notification for early exit from position"""
+        pnl_str = f"💰 PnL: ${pnl:+.2f}\n" if pnl is not None else ""
+        health_str = f"📊 Setup Health: {health}%\n" if health is not None else ""
+        
+        message = (
+            f"⚡ *EARLY EXIT TRIGGERED*\n\n"
+            f"📊 {side.upper()} {symbol}\n"
+            f"{health_str}"
+            f"{pnl_str}"
+            f"📝 Reason: {reason}\n\n"
+            f"🛡️ Capital protected before SL hit!"
+        )
+        
+        await self.send_message(message)
+    
+    async def notify_manual_position_detected(self, symbol: str, side: str, size: float, entry_price: float):
+        """Send notification when manual position is detected"""
+        message = (
+            f"👤 *MANUAL POSITION DETECTED*\n\n"
+            f"📊 {side.upper()} {symbol}\n"
+            f"💵 Entry: ${entry_price:.4f}\n"
+            f"📊 Size: {size:.4f}\n\n"
+            f"🤖 Bot will now manage this position!\n"
+            f"🎯 Auto-setting TP/SL based on ATR..."
+        )
+        
+        await self.send_message(message)
+    
+    async def notify_tpsl_set(self, symbol: str, sl_price: float, tp_price: float, source: str = "bot"):
+        """Send notification when TP/SL is set for a position"""
+        source_emoji = "🤖" if source == "bot" else "👤"
+        
+        message = (
+            f"{source_emoji} *TP/SL SET FOR {symbol}*\n\n"
+            f"🛑 Stop Loss: ${sl_price:.4f}\n"
+            f"🎯 Take Profit: ${tp_price:.4f}\n\n"
+            f"💎 Position now protected!"
+        )
+        
+        await self.send_message(message)
