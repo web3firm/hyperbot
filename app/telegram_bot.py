@@ -1294,8 +1294,8 @@ class TelegramBot:
             lines = ["📊 *MANAGED POSITIONS*\n"]
             
             for symbol, pos in managed.items():
-                source = "🤖 Bot" if pos.source == 'bot' else "👤 Manual"
-                health = pos.setup_health if pos.setup_health else 100
+                source = "👤 Manual" if pos.is_manual else "🤖 Bot"
+                health = 100 - (pos.health_checks_failed * 20)  # Simple health estimate
                 health_emoji = "🟢" if health >= 70 else ("🟡" if health >= 40 else "🔴")
                 
                 side_emoji = "🟢" if pos.side.lower() == 'long' else "🔴"
@@ -1304,13 +1304,13 @@ class TelegramBot:
                 lines.append(f"   Entry: ${pos.entry_price:.4f}")
                 lines.append(f"   Size: {pos.size:.4f}")
                 
-                if pos.stop_loss:
-                    lines.append(f"   🛑 SL: ${pos.stop_loss:.4f}")
+                if pos.sl_price:
+                    lines.append(f"   🛑 SL: ${pos.sl_price:.4f}")
                 else:
                     lines.append(f"   🛑 SL: Not Set ⚠️")
                     
-                if pos.take_profit:
-                    lines.append(f"   🎯 TP: ${pos.take_profit:.4f}")
+                if pos.tp_price:
+                    lines.append(f"   🎯 TP: ${pos.tp_price:.4f}")
                 else:
                     lines.append(f"   🎯 TP: Not Set ⚠️")
                 

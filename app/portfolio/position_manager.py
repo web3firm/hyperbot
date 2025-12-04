@@ -145,6 +145,11 @@ class PositionManager:
         logger.info(f"   Break-Even: {self.break_even_enabled}")
         logger.info(f"   Early Exit: {self.early_exit_enabled}")
     
+    @property
+    def managed_positions(self) -> Dict[str, ManagedPosition]:
+        """Get all currently managed positions"""
+        return self.positions
+    
     async def scan_positions(self) -> List[ManagedPosition]:
         """
         Scan for all open positions and detect new/manual ones.
@@ -153,8 +158,10 @@ class PositionManager:
             List of newly detected positions
         """
         try:
-            # Get current positions from exchange
+            # Get current positions from exchange (sync call)
             current_positions = self.client.get_open_positions()
+            if current_positions is None:
+                current_positions = []
             new_positions = []
             
             # Track which symbols have positions

@@ -274,15 +274,18 @@ class HyperAIBot:
             # Phase 6: Initialize Position Manager (manages manual orders + early exit)
             position_manager_config = {
                 'check_interval_seconds': 5,  # Check every 5 seconds
-                'auto_set_tpsl': True,  # Auto-set TP/SL for manual orders
-                'enable_early_exit': True,  # Early exit on failed setups
-                'health_threshold': 40,  # Exit if setup health drops below 40%
-                'atr_sl_multiplier': 2.0,  # SL = 2x ATR
-                'atr_tp_multiplier': 4.0,  # TP = 4x ATR (2:1 R:R)
+                'auto_tpsl': True,  # Auto-set TP/SL for manual orders
+                'early_exit': True,  # Early exit on failed setups
+                'health_check': True,  # Monitor position health
+                'trailing_stop': True,  # Enable trailing stops
+                'break_even': True,  # Move SL to break-even
+                'default_tp_pct': 3.0,  # Default TP = 3%
+                'default_sl_pct': 1.5,  # Default SL = 1.5%
             }
             self.position_manager = PositionManager(
-                hl_client=self.client,
+                client=self.client,
                 order_manager=self.order_manager,
+                strategy=self.strategy,
                 config=position_manager_config
             )
             logger.info("🎯 Phase 6: Position Manager initialized (manual order management + early exit)")
@@ -960,13 +963,39 @@ class HyperAIBot:
                     # Get current candles for indicator calculation
                     candles = self._candles_cache if self._candles_cache else []
                     
-                    # Run position manager check
-                    await self.position_manager.check_positions(
-                        candles=candles,
-                        telegram_bot=self.telegram_bot
-                    )
+                    # Scan for new/manual positions
+                    new_positions = await self.position_manager.scan_positions()
                     
-                    # Use adaptive interval from position manager
+                    # Notify about new manual positions
+                    for pos in new_positions:
+                        if pos.is_manual and self.telegram_bot:
+                            try:
+                                await self.telegram_bot.notify_manual_position_detected(
+                                    symbol=pos.symbol,
+                                    side=pos.side,
+                                    size=pos.size,
+                                    entry_price=pos.entry_price
+                                )
+                            except Exception as e:
+                                logger.debug(f"Failed to send manual position notification: {e}")
+                    
+                    # Manage each tracked position
+                    for symbol, position in list(self.position_manager.positions.items()):
+                        exit_reason = await self.position_manager.manage_position(position, candles)
+                        
+                        if exit_reason and self.telegram_bot:
+                            try:
+                                await self.telegram_bot.notify_early_exit(
+                                    symbol=position.symbol,
+                                    side=position.side,
+                                    reason=exit_reason.value,
+                                    pnl=position.unrealized_pnl,
+                                    health=position.health_checks_failed
+                                )
+                            except Exception as e:
+                                logger.debug(f"Failed to send early exit notification: {e}")
+                    
+                    # Use interval from config
                     await asyncio.sleep(self.position_manager.config.get('check_interval_seconds', 5))
                     
                 except asyncio.CancelledError:
