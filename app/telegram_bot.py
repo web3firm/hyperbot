@@ -148,12 +148,22 @@ class TelegramBot:
             self.application.add_handler(CommandHandler("balance", self._cmd_balance))
             self.application.add_handler(CommandHandler("regime", self._cmd_regime))
             self.application.add_handler(CommandHandler("session", self._cmd_session))
+            self.application.add_handler(CommandHandler("kelly", self._cmd_kelly))
             
             # Position Management commands (Phase 6)
             self.application.add_handler(CommandHandler("managed", self._cmd_managed))
             self.application.add_handler(CommandHandler("setsl", self._cmd_setsl))
             self.application.add_handler(CommandHandler("settp", self._cmd_settp))
             self.application.add_handler(CommandHandler("autotpsl", self._cmd_autotpsl))
+            
+            # Multi-Asset commands
+            self.application.add_handler(CommandHandler("assets", self._cmd_assets))
+            
+            # Backtesting command
+            self.application.add_handler(CommandHandler("backtest", self._cmd_backtest))
+            
+            # Debug commands
+            self.application.add_handler(CommandHandler("debugpos", self._cmd_debugpos))
             
             # Callback handler for inline buttons
             self.application.add_handler(CallbackQueryHandler(self._handle_callback))
@@ -300,29 +310,53 @@ class TelegramBot:
             # Bot status emoji
             status_emoji = "✅" if self.bot.is_running and not self.bot.is_paused else "⏸️" if self.bot.is_paused else "🛑"
             
-            # Get account values safely
-            account_value = float(self.bot.account_value)
-            margin_used = float(self.bot.margin_used)
-            available = account_value - margin_used
-            margin_pct = (margin_used / account_value * 100) if account_value > 0 else 0
+            # Check for paper trading mode
+            is_paper = hasattr(self.bot, 'is_paper_trading') and self.bot.is_paper_trading
             
-            message = (
-                f"{status_emoji} *SYSTEM STATUS*\n\n"
-                f"*Account:*\n"
-                f"💰 Balance: ${account_value:.2f}\n"
-                f"📊 Margin: ${margin_used:.2f}\n"
-                f"✅ Available: ${available:.2f}\n"
-                f"📈 Margin %: {margin_pct:.1f}%\n\n"
-                f"*Trading:*\n"
-                f"🎯 Status: {'ACTIVE' if self.bot.is_running and not self.bot.is_paused else 'PAUSED' if self.bot.is_paused else 'STOPPED'}\n"
-                f"📊 Strategies: 2 (Swing 70% + Scalping)\n"
-                f"🔄 Trades Today: {self.bot.trades_executed}\n"
-                f"⏰ Uptime: {uptime_str}\n\n"
-                f"*Risk:*\n"
-                f"🛡️ Max Leverage: 5x\n"
-                f"⚠️ Max Daily Loss: 5%\n"
-                f"🔴 Kill Switch: {'ACTIVE' if hasattr(self.bot, 'kill_switch') and self.bot.kill_switch and hasattr(self.bot.kill_switch, 'is_triggered') and self.bot.kill_switch.is_triggered else 'STANDBY'}"
-            )
+            if is_paper and hasattr(self.bot, 'paper_trading') and self.bot.paper_trading:
+                # Paper trading status
+                stats = self.bot.paper_trading.get_statistics()
+                message = (
+                    f"📝 *PAPER TRADING MODE*\n\n"
+                    f"*Virtual Account:*\n"
+                    f"💰 Balance: ${stats['current_balance']:.2f}\n"
+                    f"📊 Equity: ${stats['equity']:.2f}\n"
+                    f"📈 Total P&L: ${stats['total_pnl']:+.2f} ({stats['total_pnl_pct']:+.2f}%)\n\n"
+                    f"*Performance:*\n"
+                    f"🎯 Trades: {stats['total_trades']}\n"
+                    f"✅ Wins: {stats['winning_trades']}\n"
+                    f"❌ Losses: {stats['losing_trades']}\n"
+                    f"📊 Win Rate: {stats['win_rate']:.1f}%\n"
+                    f"📉 Max DD: {stats['max_drawdown_pct']:.2f}%\n\n"
+                    f"*Status:*\n"
+                    f"🔄 Open Positions: {stats['open_positions']}\n"
+                    f"⏰ Uptime: {uptime_str}\n\n"
+                    f"⚠️ _No real trades executed_"
+                )
+            else:
+                # Real trading status
+                account_value = float(self.bot.account_value)
+                margin_used = float(self.bot.margin_used)
+                available = account_value - margin_used
+                margin_pct = (margin_used / account_value * 100) if account_value > 0 else 0
+                
+                message = (
+                    f"{status_emoji} *SYSTEM STATUS*\n\n"
+                    f"*Account:*\n"
+                    f"💰 Balance: ${account_value:.2f}\n"
+                    f"📊 Margin: ${margin_used:.2f}\n"
+                    f"✅ Available: ${available:.2f}\n"
+                    f"📈 Margin %: {margin_pct:.1f}%\n\n"
+                    f"*Trading:*\n"
+                    f"🎯 Status: {'ACTIVE' if self.bot.is_running and not self.bot.is_paused else 'PAUSED' if self.bot.is_paused else 'STOPPED'}\n"
+                    f"📊 Strategies: 2 (Swing 70% + Scalping)\n"
+                    f"🔄 Trades Today: {self.bot.trades_executed}\n"
+                    f"⏰ Uptime: {uptime_str}\n\n"
+                    f"*Risk:*\n"
+                    f"🛡️ Max Leverage: 5x\n"
+                    f"⚠️ Max Daily Loss: 5%\n"
+                    f"🔴 Kill Switch: {'ACTIVE' if hasattr(self.bot, 'kill_switch') and self.bot.kill_switch and hasattr(self.bot.kill_switch, 'is_triggered') and self.bot.kill_switch.is_triggered else 'STANDBY'}"
+                )
             
             await update.message.reply_text(message, parse_mode='Markdown')
             
@@ -528,32 +562,39 @@ class TelegramBot:
         try:
             from datetime import datetime
             import os
+            from pathlib import Path
             
-            # Get today's log file
+            # Get today's log file - check multiple locations
             log_date = datetime.now().strftime('%Y%m%d')
-            log_file = f"/workspaces/hyperbot/logs/bot_{log_date}.log"
             
-            if not os.path.exists(log_file):
-                # Try alternative locations
-                alt_locations = [
-                    f"/root/hyperbot/logs/bot_{log_date}.log",
-                    "./logs/bot.log",
-                    "./logs/bot_output.log"
-                ]
-                
-                for alt_file in alt_locations:
-                    if os.path.exists(alt_file):
-                        log_file = alt_file
-                        break
-                else:
-                    await update.message.reply_text(
-                        f"📭 No log file found for today ({log_date})\n\n"
-                        "This is normal if:\n"
-                        "• Bot is running on VPS (logs at /root/hyperbot/logs/)\n"
-                        "• Using PM2 (check with: pm2 logs hyperbot)\n"
-                        "• No activity today yet"
-                    )
-                    return
+            # Find workspace root
+            workspace_root = Path(__file__).parent.parent
+            
+            # Try various log file locations
+            possible_paths = [
+                workspace_root / f"logs/bot_{log_date}.log",
+                workspace_root / "logs/bot.log",
+                Path(f"/workspaces/hyperbot/logs/bot_{log_date}.log"),
+                Path("/workspaces/hyperbot/logs/bot.log"),
+                Path(f"/root/hyperbot/logs/bot_{log_date}.log"),
+                Path("./logs/bot.log"),
+            ]
+            
+            log_file = None
+            for path in possible_paths:
+                if path.exists():
+                    log_file = str(path)
+                    break
+            
+            if not log_file:
+                await update.message.reply_text(
+                    f"📭 No log file found for today ({log_date})\n\n"
+                    f"Searched:\n"
+                    f"• {workspace_root}/logs/\n"
+                    f"• /workspaces/hyperbot/logs/\n\n"
+                    "Use terminal to check logs directly."
+                )
+                return
             
             # Read last 50 lines
             with open(log_file, 'r') as f:
@@ -668,6 +709,11 @@ class TelegramBot:
                 "/market - Current market overview\n"
                 "/regime - Market regime analysis\n"
                 "/session - Current trading session\n\n"
+                "<b>🌐 Multi-Asset Trading:</b>\n"
+                "/assets - Multi-asset status and P&L\n"
+                "/kelly - Kelly Criterion position sizing\n\n"
+                "<b>🧪 Backtesting:</b>\n"
+                "/backtest [symbol] [days] - Run strategy backtest\n\n"
                 "<b>📉 Position Control:</b>\n"
                 "/close [symbol] - Close specific position\n"
                 "/closeall - Close all positions (⚠️ careful!)\n\n"
@@ -683,6 +729,8 @@ class TelegramBot:
                 "/dbstats - Database health and size\n\n"
                 "<b>🤖 ML Training:</b>\n"
                 "/train - Trigger ML model retraining\n\n"
+                "<b>🔧 Debug:</b>\n"
+                "/debugpos [symbol] - Raw position/order data\n\n"
                 "<b>🎛️ Control Buttons:</b>\n"
                 "🚀 START - Resume trading\n"
                 "🛑 STOP - Pause trading\n\n"
@@ -764,36 +812,45 @@ class TelegramBot:
     async def _cmd_regime(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /regime command - Show current market regime"""
         try:
-            if hasattr(self.bot, 'strategy') and hasattr(self.bot.strategy, 'strategies'):
-                # Get regime from world-class swing strategy
-                for name, strategy in self.bot.strategy.strategies.items():
-                    if hasattr(strategy, 'regime_detector'):
-                        candles = self.bot.current_candles if hasattr(self.bot, 'current_candles') else []
-                        if candles:
-                            regime = strategy.regime_detector.detect(candles)
-                            
-                            regime_emoji = {
-                                'trending_up': '📈🟢',
-                                'trending_down': '📉🔴', 
-                                'ranging': '↔️🟡',
-                                'volatile': '⚡🟠',
-                                'breakout': '🚀💥'
-                            }.get(regime.regime_type, '❓')
-                            
-                            message = (
-                                f"🧠 *MARKET REGIME ANALYSIS*\n\n"
-                                f"{regime_emoji} Regime: {regime.regime_type.upper()}\n"
-                                f"📊 Confidence: {regime.confidence:.0%}\n"
-                                f"📈 ADX: {regime.adx:.1f}\n"
-                                f"⚡ Volatility: {'High' if regime.volatility > 1.5 else 'Normal' if regime.volatility > 0.8 else 'Low'}\n"
-                                f"📊 Trend Strength: {regime.trend_strength:.0%}\n\n"
-                                f"💡 Strategy: {regime.preferred_strategy}"
-                            )
-                            
-                            await update.message.reply_text(message, parse_mode='Markdown')
-                            return
+            # Get candles first
+            candles = self.bot.current_candles if hasattr(self.bot, 'current_candles') else []
             
-            await update.message.reply_text("❌ Regime detector not available")
+            if not candles or len(candles) < 30:
+                await update.message.reply_text(
+                    "⏳ *Waiting for market data...*\n\n"
+                    f"Candles collected: {len(candles) if candles else 0}/30",
+                    parse_mode='Markdown'
+                )
+                return
+            
+            # Access regime detector from swing strategy
+            if hasattr(self.bot, 'strategy') and self.bot.strategy:
+                swing = self.bot.strategy.strategies.get('swing')
+                if swing and hasattr(swing, 'regime_detector'):
+                    regime = swing.regime_detector.detect(candles)
+                    
+                    regime_emoji = {
+                        'trending_up': '📈🟢',
+                        'trending_down': '📉🔴', 
+                        'ranging': '↔️🟡',
+                        'volatile': '⚡🟠',
+                        'breakout': '🚀💥'
+                    }.get(regime.regime_type, '❓')
+                    
+                    message = (
+                        f"🧠 *MARKET REGIME ANALYSIS*\n\n"
+                        f"{regime_emoji} Regime: {regime.regime_type.upper()}\n"
+                        f"📊 Confidence: {regime.confidence:.0%}\n"
+                        f"📈 ADX: {regime.adx:.1f}\n"
+                        f"⚡ Volatility: {'High' if regime.volatility > 1.5 else 'Normal' if regime.volatility > 0.8 else 'Low'}\n"
+                        f"📊 Trend Strength: {regime.trend_strength:.0%}\n\n"
+                        f"💡 Strategy: {regime.preferred_strategy}"
+                    )
+                    
+                    await update.message.reply_text(message, parse_mode='Markdown')
+                    return
+            
+            await update.message.reply_text("❌ Regime detector not available - strategy not initialized")
             
         except Exception as e:
             logger.error(f"Error in /regime command: {e}", exc_info=True)
@@ -808,17 +865,20 @@ class TelegramBot:
                         session = strategy.session_manager.get_current_session()
                         params = strategy.session_manager.get_session_params()
                         
+                        # session is an Enum - use .value for string
+                        session_name = session.value if hasattr(session, 'value') else str(session)
+                        
                         session_emoji = {
                             'asian': '🌏',
                             'london': '🇬🇧',
                             'us_morning': '🇺🇸',
                             'us_afternoon': '🌆',
                             'off_hours': '🌙'
-                        }.get(session, '❓')
+                        }.get(session_name, '❓')
                         
                         message = (
                             f"⏰ *TRADING SESSION*\n\n"
-                            f"{session_emoji} Session: {session.upper()}\n\n"
+                            f"{session_emoji} Session: {session_name.upper()}\n\n"
                             f"*Parameters:*\n"
                             f"📊 Size Multiplier: {params.get('size_multiplier', 1):.2f}x\n"
                             f"⚡ Volatility Factor: {params.get('volatility_factor', 1):.2f}x\n"
@@ -837,6 +897,191 @@ class TelegramBot:
             logger.error(f"Error in /session command: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
     
+    async def _cmd_assets(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /assets command - Show multi-asset trading status"""
+        try:
+            # Check if multi-asset mode is enabled
+            if not self.bot.multi_asset_mode:
+                message = (
+                    "🌐 *MULTI-ASSET MODE*\n\n"
+                    "❌ Currently DISABLED\n\n"
+                    "*To enable:*\n"
+                    "1. Set `MULTI_ASSET_MODE=true` in .env\n"
+                    "2. Set `MULTI_ASSETS=BTC,ETH,SOL` (comma-separated)\n"
+                    "3. Set `MAX_POSITIONS=3` for simultaneous positions\n"
+                    "4. Restart bot\n\n"
+                    f"_Current mode: Single asset ({self.bot.symbol})_"
+                )
+                await update.message.reply_text(message, parse_mode='Markdown')
+                return
+            
+            # Get multi-asset manager
+            if not hasattr(self.bot, 'asset_manager') or not self.bot.asset_manager:
+                await update.message.reply_text("❌ Asset manager not initialized")
+                return
+            
+            am = self.bot.asset_manager
+            stats = am.get_stats()
+            
+            # Build message
+            message = (
+                "🌐 *MULTI-ASSET TRADING*\n\n"
+                f"✅ Mode: ENABLED\n"
+                f"📊 Positions: {stats['positions_open']}/{stats['max_positions']}\n"
+                f"📈 Trades Today: {stats['total_trades_today']}\n"
+                f"🎯 Win Rate: {stats['win_rate']:.1f}%\n"
+                f"💰 P&L Today: ${stats['total_pnl_today']:+.2f}\n\n"
+                "*Asset Status:*\n"
+            )
+            
+            for symbol, asset_stats in stats['per_asset'].items():
+                if asset_stats['enabled']:
+                    if asset_stats['has_position']:
+                        side_emoji = "🟢" if asset_stats['position_side'] == 'long' else "🔴"
+                        status = f"{side_emoji} {asset_stats['position_side'].upper()}"
+                    else:
+                        status = "⏳ Scanning"
+                    
+                    pnl_str = f" | ${asset_stats['pnl']:+.2f}" if asset_stats['trades'] > 0 else ""
+                    message += f"• {symbol}: {status} ({asset_stats['trades']} trades{pnl_str})\n"
+                else:
+                    message += f"• {symbol}: 🚫 Disabled\n"
+            
+            message += "\n_Use /status for detailed position info_"
+            
+            await update.message.reply_text(message, parse_mode='Markdown')
+            
+        except Exception as e:
+            logger.error(f"Error in /assets command: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+    async def _cmd_kelly(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /kelly command - Show Kelly Criterion position sizing"""
+        try:
+            # Check if Kelly calculator is available
+            if not hasattr(self.bot, 'kelly') or not self.bot.kelly:
+                # Try to get from global instance
+                from app.risk.kelly_criterion import get_kelly_calculator
+                kelly = get_kelly_calculator()
+            else:
+                kelly = self.bot.kelly
+            
+            # Get Kelly stats
+            stats = kelly.get_stats_summary()
+            result = kelly.calculate()
+            
+            # Determine status emoji
+            if result.sample_size < kelly.min_trades:
+                status_emoji = "⏳"
+                status_text = f"Warming Up ({result.sample_size}/{kelly.min_trades} trades)"
+            elif result.edge < 0:
+                status_emoji = "🔴"
+                status_text = "Negative Edge - Review Strategy!"
+            elif result.edge < 0.1:
+                status_emoji = "🟡"
+                status_text = "Low Edge - Proceed with Caution"
+            else:
+                status_emoji = "🟢"
+                status_text = "Positive Edge - Good to Trade"
+            
+            message = (
+                f"📊 *KELLY CRITERION SIZING*\n\n"
+                f"{status_emoji} Status: {status_text}\n\n"
+                f"*Statistics:*\n"
+                f"📈 Win Rate: {stats['win_rate']}\n"
+                f"💰 Win/Loss Ratio: {stats['win_loss_ratio']}\n"
+                f"🎯 Edge: {stats['edge']}\n\n"
+                f"*Position Sizing:*\n"
+                f"📊 Full Kelly: {stats['full_kelly']}\n"
+                f"✅ Recommended: {stats['recommended_size']}\n"
+                f"🔒 Confidence: {stats['confidence']}\n\n"
+                f"_Based on {stats['trades_analyzed']} trades_"
+            )
+            
+            await update.message.reply_text(message, parse_mode='Markdown')
+            
+        except Exception as e:
+            logger.error(f"Error in /kelly command: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+    
+    async def _cmd_backtest(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /backtest command - Run strategy backtest"""
+        try:
+            args = context.args
+            
+            # Parse arguments: /backtest [symbol] [days]
+            symbol = args[0].upper() if args else self.bot.symbol
+            days = int(args[1]) if len(args) > 1 else 7
+            
+            # Limit days to prevent excessive API calls
+            if days > 30:
+                await update.message.reply_text("⚠️ Max 30 days for backtest. Using 30 days.")
+                days = 30
+            
+            await update.message.reply_text(
+                f"🧪 Running backtest for {symbol}...\n"
+                f"⏳ Fetching {days} days of data...",
+                parse_mode='Markdown'
+            )
+            
+            try:
+                from app.backtesting.backtester import Backtester
+                from app.strategies.strategy_manager import StrategyManager
+                
+                # Fetch candles (1m candles, ~1440 per day)
+                num_candles = days * 1440
+                candles = self.bot.client.get_candles(symbol, '1m', min(num_candles, 10000))
+                
+                if not candles or len(candles) < 200:
+                    await update.message.reply_text(f"❌ Insufficient data for {symbol}")
+                    return
+                
+                # Create strategy for this symbol
+                strategy = StrategyManager(symbol)
+                
+                # Run backtest
+                backtester = Backtester(
+                    strategy=strategy,
+                    initial_balance=float(self.bot.account_value or 10000),
+                    leverage=5
+                )
+                
+                result = await backtester.run(candles, symbol=symbol)
+                
+                # Format results
+                pnl_emoji = "🟢" if result.total_pnl > 0 else "🔴"
+                wr_emoji = "✅" if float(result.win_rate) >= 50 else "⚠️"
+                
+                message = (
+                    f"🧪 *BACKTEST RESULTS - {symbol}*\n\n"
+                    f"📅 Period: {result.start_date.strftime('%Y-%m-%d')} to {result.end_date.strftime('%Y-%m-%d')}\n"
+                    f"📊 Candles: {len(candles)}\n\n"
+                    f"*Performance:*\n"
+                    f"{pnl_emoji} P&L: ${float(result.total_pnl):+,.2f} ({float(result.total_pnl_pct):+.1f}%)\n"
+                    f"💰 Final Balance: ${float(result.final_balance):,.2f}\n\n"
+                    f"*Trade Stats:*\n"
+                    f"📈 Total Trades: {result.total_trades}\n"
+                    f"{wr_emoji} Win Rate: {float(result.win_rate):.1f}%\n"
+                    f"✅ Winners: {result.winning_trades}\n"
+                    f"❌ Losers: {result.losing_trades}\n"
+                    f"💹 Profit Factor: {float(result.profit_factor):.2f}\n\n"
+                    f"*Risk Metrics:*\n"
+                    f"📉 Max Drawdown: {float(result.max_drawdown_pct):.1f}%\n"
+                    f"📊 Sharpe Ratio: {float(result.sharpe_ratio):.2f}\n"
+                    f"📊 Sortino Ratio: {float(result.sortino_ratio):.2f}\n\n"
+                    f"_Use /backtest {symbol} [days] for different periods_"
+                )
+                
+                await update.message.reply_text(message, parse_mode='Markdown')
+                
+            except Exception as e:
+                logger.error(f"Backtest error: {e}", exc_info=True)
+                await update.message.reply_text(f"❌ Backtest failed: {str(e)[:100]}")
+            
+        except Exception as e:
+            logger.error(f"Error in /backtest command: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
     async def _cmd_close(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /close command - Close a specific position"""
         try:
@@ -1014,7 +1259,8 @@ class TelegramBot:
             
             await query.edit_message_text(f"⏳ Closing {symbol} position...")
             
-            result = await self.bot.client.market_close(symbol, size, side)
+            # Use order_manager.market_close (sync method)
+            result = self.bot.order_manager.market_close(symbol)
             
             if result.get('status') == 'ok':
                 await query.edit_message_text(
@@ -1046,10 +1292,8 @@ class TelegramBot:
             
             for pos in positions:
                 try:
-                    side = 'sell' if pos['side'] == 'long' else 'buy'
-                    size = abs(pos['size'])
-                    
-                    result = await self.bot.client.market_close(pos['symbol'], size, side)
+                    # Use order_manager.market_close (sync method)
+                    result = self.bot.order_manager.market_close(pos['symbol'])
                     
                     if result.get('status') == 'ok':
                         closed += 1
@@ -1291,6 +1535,27 @@ class TelegramBot:
                 )
                 return
             
+            # Get actual TP/SL orders from exchange for accurate display
+            exchange_orders = {}
+            try:
+                all_orders = self.bot.client.get_frontend_open_orders()
+                for order in all_orders:
+                    coin = order.get('coin')
+                    if order.get('isPositionTpsl') or order.get('isTrigger'):
+                        if coin not in exchange_orders:
+                            exchange_orders[coin] = {'tp': None, 'sl': None}
+                        
+                        trigger_px = float(order.get('triggerPx', 0))
+                        trigger_cond = order.get('triggerCondition', '')
+                        
+                        # Determine if TP or SL based on trigger condition
+                        if 'above' in trigger_cond.lower():
+                            exchange_orders[coin]['sl' if order.get('side') == 'B' else 'tp'] = trigger_px
+                        elif 'below' in trigger_cond.lower():
+                            exchange_orders[coin]['tp' if order.get('side') == 'B' else 'sl'] = trigger_px
+            except Exception as e:
+                logger.warning(f"Could not fetch exchange orders: {e}")
+            
             lines = ["📊 *MANAGED POSITIONS*\n"]
             
             for symbol, pos in managed.items():
@@ -1300,17 +1565,22 @@ class TelegramBot:
                 
                 side_emoji = "🟢" if pos.side.lower() == 'long' else "🔴"
                 
+                # Get TP/SL from exchange orders first, fallback to in-memory
+                coin_orders = exchange_orders.get(pos.symbol, {})
+                sl_price = coin_orders.get('sl') or pos.sl_price
+                tp_price = coin_orders.get('tp') or pos.tp_price
+                
                 lines.append(f"\n{side_emoji} *{symbol}* ({source})")
                 lines.append(f"   Entry: ${pos.entry_price:.4f}")
                 lines.append(f"   Size: {pos.size:.4f}")
                 
-                if pos.sl_price:
-                    lines.append(f"   🛑 SL: ${pos.sl_price:.4f}")
+                if sl_price:
+                    lines.append(f"   🛑 SL: ${sl_price:.4f} ✅")
                 else:
                     lines.append(f"   🛑 SL: Not Set ⚠️")
                     
-                if pos.tp_price:
-                    lines.append(f"   🎯 TP: ${pos.tp_price:.4f}")
+                if tp_price:
+                    lines.append(f"   🎯 TP: ${tp_price:.4f} ✅")
                 else:
                     lines.append(f"   🎯 TP: Not Set ⚠️")
                 
@@ -1337,23 +1607,38 @@ class TelegramBot:
             sl_price = float(context.args[1])
             
             # Use order manager to set SL (sync method)
-            result = self.bot.order_manager.set_position_tpsl(
-                symbol=symbol,
-                sl_price=sl_price
-            )
+            try:
+                result = self.bot.order_manager.set_position_tpsl(
+                    symbol=symbol,
+                    sl_price=sl_price
+                )
+            except Exception as e:
+                await update.message.reply_text(f"❌ Order failed: {str(e)}")
+                return
             
             if result.get('status') == 'ok':
-                await update.message.reply_text(
-                    f"✅ *STOP LOSS SET*\n\n"
-                    f"📊 {symbol}\n"
-                    f"🛑 SL: ${sl_price:.4f}",
-                    parse_mode='Markdown'
-                )
+                # Check for errors in response
+                orders_result = result.get('results', [])
+                error_found = False
+                for order_res in orders_result:
+                    res = order_res.get('result', {})
+                    if isinstance(res, dict):
+                        statuses = res.get('response', {}).get('data', {}).get('statuses', [])
+                        for s in statuses:
+                            if 'error' in s:
+                                await update.message.reply_text(f"❌ Order error: {s['error']}")
+                                error_found = True
+                
+                if not error_found:
+                    await update.message.reply_text(
+                        f"✅ *STOP LOSS SET*\n\n"
+                        f"📊 {symbol}\n"
+                        f"🛑 SL: ${sl_price:.4f}",
+                        parse_mode='Markdown'
+                    )
             else:
-                await update.message.reply_text(
-                    f"❌ Failed to set SL: {result.get('error')}",
-                    parse_mode='Markdown'
-                )
+                error_msg = result.get('message', result.get('error', 'Unknown'))
+                await update.message.reply_text(f"❌ Failed to set SL: {error_msg}")
                 
         except ValueError:
             await update.message.reply_text("❌ Invalid price format")
@@ -1376,23 +1661,38 @@ class TelegramBot:
             tp_price = float(context.args[1])
             
             # Use order manager to set TP (sync method)
-            result = self.bot.order_manager.set_position_tpsl(
-                symbol=symbol,
-                tp_price=tp_price
-            )
+            try:
+                result = self.bot.order_manager.set_position_tpsl(
+                    symbol=symbol,
+                    tp_price=tp_price
+                )
+            except Exception as e:
+                await update.message.reply_text(f"❌ Order failed: {str(e)}")
+                return
             
             if result.get('status') == 'ok':
-                await update.message.reply_text(
-                    f"✅ *TAKE PROFIT SET*\n\n"
-                    f"📊 {symbol}\n"
-                    f"🎯 TP: ${tp_price:.4f}",
-                    parse_mode='Markdown'
-                )
+                # Check for errors in response
+                orders_result = result.get('results', [])
+                error_found = False
+                for order_res in orders_result:
+                    res = order_res.get('result', {})
+                    if isinstance(res, dict):
+                        statuses = res.get('response', {}).get('data', {}).get('statuses', [])
+                        for s in statuses:
+                            if 'error' in s:
+                                await update.message.reply_text(f"❌ Order error: {s['error']}")
+                                error_found = True
+                
+                if not error_found:
+                    await update.message.reply_text(
+                        f"✅ *TAKE PROFIT SET*\n\n"
+                        f"📊 {symbol}\n"
+                        f"🎯 TP: ${tp_price:.4f}",
+                        parse_mode='Markdown'
+                    )
             else:
-                await update.message.reply_text(
-                    f"❌ Failed to set TP: {result.get('error')}",
-                    parse_mode='Markdown'
-                )
+                error_msg = result.get('message', result.get('error', 'Unknown'))
+                await update.message.reply_text(f"❌ Failed to set TP: {error_msg}")
                 
         except ValueError:
             await update.message.reply_text("❌ Invalid price format")
@@ -1406,6 +1706,8 @@ class TelegramBot:
             # Get symbol from args or use default
             symbol = context.args[0].upper() if context.args else self.bot.symbol
             
+            await update.message.reply_text(f"🔍 Checking position for {symbol}...")
+            
             # Get current candles for ATR calculation
             candles = self.bot._candles_cache if hasattr(self.bot, '_candles_cache') else []
             
@@ -1414,20 +1716,26 @@ class TelegramBot:
                 return
             
             # Get current position (sync method)
-            positions = self.bot.client.get_open_positions()
+            try:
+                positions = self.bot.client.get_open_positions()
+            except Exception as e:
+                await update.message.reply_text(f"❌ Failed to get positions: {e}")
+                return
+                
+            logger.info(f"AutoTPSL: Found {len(positions)} positions")
+            
             position = next((p for p in positions if p.get('symbol') == symbol), None)
             
             if not position:
-                await update.message.reply_text(f"❌ No open position for {symbol}")
+                pos_list = [p.get('symbol') for p in positions]
+                await update.message.reply_text(f"❌ No open position for {symbol}\n\nAvailable: {pos_list if pos_list else 'None'}")
                 return
             
             # Calculate ATR for TP/SL
-            from decimal import Decimal
-            
             # Get price data for ATR
             highs = [float(c['high']) for c in candles[-14:]]
             lows = [float(c['low']) for c in candles[-14:]]
-            closes = [float(c['close']) for c in candles[-15:-1]]  # Previous closes
+            closes = [float(c['close']) for c in candles[-15:-1]] if len(candles) > 14 else []
             
             # Calculate True Range
             true_ranges = []
@@ -1445,12 +1753,13 @@ class TelegramBot:
             atr = sum(true_ranges) / len(true_ranges) if true_ranges else 0
             
             if atr <= 0:
-                await update.message.reply_text("❌ Could not calculate ATR")
+                await update.message.reply_text("❌ Could not calculate ATR (atr=0)")
                 return
             
             # Calculate TP/SL prices
             entry_price = position['entry_price']
             is_long = position['side'] == 'long'
+            size = abs(position['size'])
             
             # Use 2x ATR for SL, 4x ATR for TP (2:1 R:R)
             sl_distance = atr * 2
@@ -1463,34 +1772,130 @@ class TelegramBot:
                 sl_price = entry_price + sl_distance
                 tp_price = entry_price - tp_distance
             
-            # Set TP/SL using order manager (sync method)
-            result = self.bot.order_manager.set_position_tpsl(
-                symbol=symbol,
-                tp_price=tp_price,
-                sl_price=sl_price
+            await update.message.reply_text(
+                f"⏳ *Setting TP/SL...*\n\n"
+                f"Position: {symbol} {position['side'].upper()} {size:.4f}\n"
+                f"Entry: ${entry_price:.4f}\n"
+                f"ATR: ${atr:.4f}\n"
+                f"SL: ${sl_price:.4f} (2x ATR)\n"
+                f"TP: ${tp_price:.4f} (4x ATR)",
+                parse_mode='Markdown'
             )
             
-            if result.get('status') == 'ok':
+            # Set TP/SL using order manager (sync method)
+            logger.info(f"AutoTPSL: Calling set_position_tpsl({symbol}, tp={tp_price:.4f}, sl={sl_price:.4f})")
+            
+            try:
+                result = self.bot.order_manager.set_position_tpsl(
+                    symbol=symbol,
+                    tp_price=tp_price,
+                    sl_price=sl_price
+                )
+            except Exception as e:
+                logger.error(f"AutoTPSL: Exception in set_position_tpsl: {e}", exc_info=True)
+                await update.message.reply_text(f"❌ Order placement failed:\n{str(e)}")
+                return
+                
+            logger.info(f"AutoTPSL: Result = {result}")
+            
+            # Check result
+            status = result.get('status', 'unknown')
+            
+            if status == 'ok':
+                orders_result = result.get('results', [])
+                
+                # Check for errors in individual orders
+                error_msgs = []
+                success_count = 0
+                for order_res in orders_result:
+                    res = order_res.get('result', {})
+                    if isinstance(res, dict):
+                        statuses = res.get('response', {}).get('data', {}).get('statuses', [])
+                        for s in statuses:
+                            if 'error' in s:
+                                error_msgs.append(s['error'])
+                            elif 'resting' in s or 'filled' in s:
+                                success_count += 1
+                
+                if error_msgs:
+                    await update.message.reply_text(
+                        f"⚠️ *TP/SL Partial Failure*\n\n"
+                        f"Errors: {', '.join(error_msgs)}\n\n"
+                        f"Try manually setting via /setsl and /settp",
+                        parse_mode='Markdown'
+                    )
+                else:
+                    await update.message.reply_text(
+                        f"✅ *TP/SL SET SUCCESSFULLY*\n\n"
+                        f"📊 {symbol} {position['side'].upper()}\n"
+                        f"📦 Size: {size:.4f}\n"
+                        f"💵 Entry: ${entry_price:.4f}\n"
+                        f"🛑 SL: ${sl_price:.4f}\n"
+                        f"🎯 TP: ${tp_price:.4f}\n\n"
+                        f"📐 ATR: ${atr:.4f}\n"
+                        f"✅ Orders placed: {success_count}",
+                        parse_mode='Markdown'
+                    )
+            elif status == 'error':
+                error_msg = result.get('message', result.get('error', 'Unknown error'))
                 await update.message.reply_text(
-                    f"✅ *AUTO TP/SL SET*\n\n"
-                    f"📊 {symbol} ({position['side'].upper()})\n"
-                    f"💵 Entry: ${entry_price:.4f}\n"
-                    f"🛑 SL: ${sl_price:.4f}\n"
-                    f"🎯 TP: ${tp_price:.4f}\n\n"
-                    f"📐 ATR: ${atr:.4f}\n"
-                    f"📏 SL Distance: 2x ATR\n"
-                    f"📏 TP Distance: 4x ATR (2:1 R:R)",
+                    f"❌ *Failed to set TP/SL*\n\n"
+                    f"Error: {error_msg}",
                     parse_mode='Markdown'
                 )
             else:
+                # Unknown status - show full result for debugging
                 await update.message.reply_text(
-                    f"❌ Failed to set TP/SL: {result.get('message', 'Unknown error')}",
+                    f"⚠️ *Unexpected result*\n\n"
+                    f"Status: {status}\n"
+                    f"Result: {str(result)[:500]}",
                     parse_mode='Markdown'
                 )
                 
         except Exception as e:
             logger.error(f"AutoTPSL command error: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Error: {str(e)}")
+
+    async def _cmd_debugpos(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Debug command to show raw position and order data"""
+        try:
+            symbol = context.args[0].upper() if context.args else self.bot.symbol
+            
+            # Raw user state from API
+            user_state = self.bot.client.info.user_state(self.bot.client.address)
+            
+            # Find position
+            positions = user_state.get('assetPositions', [])
+            target_pos = None
+            for p in positions:
+                pos = p.get('position', {})
+                if pos.get('coin') == symbol:
+                    target_pos = pos
+                    break
+            
+            # Get open orders
+            open_orders = self.bot.client.info.open_orders(self.bot.client.address)
+            symbol_orders = [o for o in open_orders if o.get('coin') == symbol]
+            
+            msg = f"🔍 *DEBUG: {symbol}*\n\n"
+            
+            if target_pos:
+                msg += f"📊 *Position:*\n"
+                msg += f"```\n{str(target_pos)[:800]}\n```\n\n"
+            else:
+                msg += "❌ No position found\n\n"
+            
+            msg += f"📋 *Open Orders ({len(symbol_orders)}):*\n"
+            for o in symbol_orders[:5]:  # First 5 orders
+                msg += f"```\n{str(o)[:300]}\n```\n"
+            
+            if len(symbol_orders) > 5:
+                msg += f"... and {len(symbol_orders) - 5} more\n"
+            
+            await update.message.reply_text(msg, parse_mode='Markdown')
+            
+        except Exception as e:
+            await update.message.reply_text(f"❌ Debug error: {str(e)}")
 
     async def notify_fill(self, fill_type: str, symbol: str, side: str, price: float, size: float):
         """Send notification for order fill"""

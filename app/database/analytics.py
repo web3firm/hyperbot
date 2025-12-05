@@ -157,7 +157,7 @@ class AnalyticsDashboard:
         overview = await self.get_overview()
         
         if overview.get('status') == 'NO_DATA':
-            return "📊 **Analytics Dashboard**\n\n❌ No trading data available yet.\n\nStart trading to see analytics!"
+            return "📊 *Analytics Dashboard*\n\n❌ No trading data available yet.\n\nStart trading to see analytics!"
         
         daily = await self.get_daily_performance(days=30)
         symbols = await self.get_symbol_performance()
@@ -167,12 +167,12 @@ class AnalyticsDashboard:
         report = []
         
         # Header
-        report.append("📊 **HYPERBOT ANALYTICS DASHBOARD**")
+        report.append("📊 *HYPERBOT ANALYTICS DASHBOARD*")
         report.append("=" * 45)
         report.append("")
         
         # Overview
-        report.append("📈 **OVERALL PERFORMANCE**")
+        report.append("📈 *OVERALL PERFORMANCE*")
         report.append(f"Total Trades: {overview['total_trades']}")
         report.append(f"Win Rate: {overview['win_rate']}%")
         report.append(f"Total P&L: ${overview['total_pnl']:+.2f}")
@@ -183,7 +183,7 @@ class AnalyticsDashboard:
         
         # Daily performance
         if daily.get('status') == 'SUCCESS':
-            report.append("📅 **DAILY PERFORMANCE (Last 30 Days)**")
+            report.append("📅 *DAILY PERFORMANCE (Last 30 Days)*")
             report.append(f"Trading Days: {daily['trading_days']}")
             report.append(f"Profitable Days: {daily['profitable_days']} ({daily['daily_win_rate']}%)")
             report.append(f"Avg Daily P&L: ${daily['avg_daily_pnl']:+.2f}")
@@ -195,7 +195,7 @@ class AnalyticsDashboard:
         
         # Symbol performance
         if symbols.get('status') == 'SUCCESS':
-            report.append("🎯 **TOP SYMBOLS**")
+            report.append("🎯 *TOP SYMBOLS*")
             for symbol in symbols['symbols'][:5]:
                 report.append(
                     f"{symbol['symbol']}: "
@@ -207,7 +207,7 @@ class AnalyticsDashboard:
         
         # Hourly analysis
         if hourly.get('status') == 'SUCCESS':
-            report.append("⏰ **BEST TRADING HOURS (UTC)**")
+            report.append("⏰ *BEST TRADING HOURS (UTC)*")
             for hour in hourly['best_hours'][:3]:
                 report.append(
                     f"{int(hour['hour_utc']):02d}:00 - "
@@ -222,7 +222,7 @@ class AnalyticsDashboard:
         
         # ML performance
         if ml.get('status') == 'SUCCESS':
-            report.append("🤖 **ML MODEL PERFORMANCE**")
+            report.append("🤖 *ML MODEL PERFORMANCE*")
             for model in ml['models']:
                 report.append(
                     f"{model['model_name']}: "
@@ -311,7 +311,7 @@ async def format_analytics_message(dashboard: AnalyticsDashboard, query_type: st
             return "❌ No daily performance data available"
         
         msg = [
-            "📅 **Daily Performance (Last 30 Days)**",
+            "📅 *Daily Performance (Last 30 Days)*",
             "",
             f"Trading Days: {data['trading_days']}",
             f"Profitable: {data['profitable_days']} ({data['daily_win_rate']}%)",
@@ -334,7 +334,7 @@ async def format_analytics_message(dashboard: AnalyticsDashboard, query_type: st
             return "❌ No symbol performance data available"
         
         msg = [
-            "🎯 **Symbol Performance**",
+            "🎯 *Symbol Performance*",
             ""
         ]
         
@@ -354,9 +354,9 @@ async def format_analytics_message(dashboard: AnalyticsDashboard, query_type: st
             return "❌ No hourly data available"
         
         msg = [
-            "⏰ **Trading Hours Analysis (UTC)**",
+            "⏰ *Trading Hours Analysis (UTC)*",
             "",
-            "**Top 5 Hours:**"
+            "*Top 5 Hours:*"
         ]
         
         for hour in data['best_hours']:
@@ -377,7 +377,7 @@ async def format_analytics_message(dashboard: AnalyticsDashboard, query_type: st
             return "❌ No ML performance data available"
         
         msg = [
-            "🤖 **ML Model Performance**",
+            "🤖 *ML Model Performance*",
             ""
         ]
         

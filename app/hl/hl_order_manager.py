@@ -146,7 +146,8 @@ class HLOrderManager:
     def atomic_market_entry_with_tpsl(self, symbol: str, is_buy: bool, size: float,
                                        tp_price: Optional[float] = None,
                                        sl_price: Optional[float] = None,
-                                       slippage: float = 0.01) -> Dict:
+                                       slippage: float = 0.01,
+                                       entry_price: Optional[float] = None) -> Dict:
         """
         ATOMIC OCO Entry: Market entry + TP + SL in single request.
         
@@ -154,19 +155,34 @@ class HLOrderManager:
         - When entry fills, TP/SL become active
         - When TP triggers, SL is cancelled (and vice versa)
         
-        This is the proper OCO implementation for HyperLiquid.
+        Args:
+            symbol: Trading pair
+            is_buy: True for long, False for short
+            size: Position size
+            tp_price: Take profit trigger price
+            sl_price: Stop loss trigger price
+            slippage: Max slippage for entry (default 1%)
+            entry_price: Specific entry price to use (if provided, used as limit price)
         """
         sz_decimals = self.client.get_sz_decimals(symbol)
         rounded_size = round(size, sz_decimals)
         
-        # Get mid price
+        # Get mid price for reference
         mid = float(self.info.all_mids().get(symbol, 0))
         if mid <= 0:
             logger.error(f"Invalid mid price for {symbol}: {mid}")
             return {'status': 'error', 'message': 'Invalid mid price'}
         
-        # Calculate entry limit price with slippage
-        entry_px = round(mid * (1 + slippage) if is_buy else mid * (1 - slippage), 2)
+        # Use provided entry_price or calculate from mid with slippage
+        if entry_price:
+            # Use the strategy's entry price - add small buffer for execution
+            if is_buy:
+                entry_px = round(entry_price * 1.002, 2)  # 0.2% above for buys
+            else:
+                entry_px = round(entry_price * 0.998, 2)  # 0.2% below for sells
+        else:
+            # Fallback: calculate from current mid with slippage
+            entry_px = round(mid * (1 + slippage) if is_buy else mid * (1 - slippage), 2)
         
         orders = []
         
@@ -259,6 +275,80 @@ class HLOrderManager:
         logger.info(f"market_open {symbol} {'BUY' if is_buy else 'SELL'} {rounded_size} @ ${limit_px}: {result}")
         return result
     
+    def _market_order_with_price(self, symbol: str, is_buy: bool, size: float, limit_px: float) -> Dict:
+        """Place market-like order with specific limit price."""
+        sz_decimals = self.client.get_sz_decimals(symbol)
+        rounded_size = round(size, sz_decimals)
+        
+        result = self.exchange.order(
+            name=symbol,
+            is_buy=is_buy,
+            sz=rounded_size,
+            limit_px=round(limit_px, 2),
+            order_type={"limit": {"tif": "Ioc"}},
+            reduce_only=False,
+            cloid=self._gen_cloid(),
+        )
+        logger.info(f"_market_order_with_price {symbol} {'BUY' if is_buy else 'SELL'} {rounded_size} @ ${limit_px}: {result}")
+        return result
+    
+    def set_tp_sl_sdk(self, symbol: str, size: float, is_long: bool,
+                      tp_price: Optional[float] = None,
+                      sl_price: Optional[float] = None) -> List[Dict]:
+        """
+        Set TP/SL using SDK's order() function directly.
+        This is more reliable than the bulk order approach.
+        """
+        sz_decimals = self.client.get_sz_decimals(symbol)
+        rounded_size = round(size, sz_decimals)
+        results = []
+        
+        # Take Profit order
+        if tp_price:
+            try:
+                tp_result = self.exchange.order(
+                    name=symbol,
+                    is_buy=not is_long,  # Opposite side to close
+                    sz=rounded_size,
+                    limit_px=round(tp_price, 2),
+                    order_type={"trigger": {
+                        "triggerPx": round(tp_price, 2),
+                        "isMarket": True,
+                        "tpsl": "tp"
+                    }},
+                    reduce_only=True,
+                    cloid=self._gen_cloid(),
+                )
+                logger.info(f"✅ TP set @ ${tp_price:.2f}: {tp_result}")
+                results.append({'type': 'tp', 'result': tp_result})
+            except Exception as e:
+                logger.error(f"❌ Failed to set TP: {e}")
+                results.append({'type': 'tp', 'error': str(e)})
+        
+        # Stop Loss order
+        if sl_price:
+            try:
+                sl_result = self.exchange.order(
+                    name=symbol,
+                    is_buy=not is_long,  # Opposite side to close
+                    sz=rounded_size,
+                    limit_px=round(sl_price, 2),
+                    order_type={"trigger": {
+                        "triggerPx": round(sl_price, 2),
+                        "isMarket": True,
+                        "tpsl": "sl"
+                    }},
+                    reduce_only=True,
+                    cloid=self._gen_cloid(),
+                )
+                logger.info(f"✅ SL set @ ${sl_price:.2f}: {sl_result}")
+                results.append({'type': 'sl', 'result': sl_result})
+            except Exception as e:
+                logger.error(f"❌ Failed to set SL: {e}")
+                results.append({'type': 'sl', 'error': str(e)})
+        
+        return results
+    
     def market_close(self, symbol: str, slippage: float = 0.01) -> Dict:
         """Close entire position with explicit price calculation."""
         # Get current position size
@@ -306,7 +396,7 @@ class HLOrderManager:
                   use_position_grouping: bool = True) -> List[Dict]:
         """
         Set TP/SL trigger orders for an existing position.
-        Uses positionTpsl grouping when both TP and SL are provided.
+        Uses SDK's order() method directly for reliability.
         
         Args:
             symbol: Trading pair
@@ -314,90 +404,54 @@ class HLOrderManager:
             is_long: True if long position
             tp_price: Take profit trigger price
             sl_price: Stop loss trigger price
-            use_position_grouping: Use positionTpsl grouping (OCO behavior)
+            use_position_grouping: Ignored - now uses individual orders
         """
         sz_decimals = self.client.get_sz_decimals(symbol)
         rounded_size = round(size, sz_decimals)
         
-        # If both TP and SL, use grouped submission
-        if tp_price and sl_price and use_position_grouping:
-            orders = []
-            
-            # Take Profit
-            tp_order = {
-                "coin": symbol,
-                "is_buy": not is_long,
-                "sz": rounded_size,
-                "limit_px": round(tp_price, 6),
-                "order_type": {"trigger": {
-                    "triggerPx": round(tp_price, 6),
-                    "isMarket": True,
-                    "tpsl": "tp"
-                }},
-                "reduce_only": True,
-                "cloid": self._gen_cloid(),
-            }
-            orders.append(tp_order)
-            
-            # Stop Loss
-            sl_order = {
-                "coin": symbol,
-                "is_buy": not is_long,
-                "sz": rounded_size,
-                "limit_px": round(sl_price, 6),
-                "order_type": {"trigger": {
-                    "triggerPx": round(sl_price, 6),
-                    "isMarket": True,
-                    "tpsl": "sl"
-                }},
-                "reduce_only": True,
-                "cloid": self._gen_cloid(),
-            }
-            orders.append(sl_order)
-            
-            # Submit with positionTpsl grouping (TP/SL for existing position)
-            result = self.bulk_orders_with_grouping(orders, grouping="positionTpsl")
-            logger.info(f"set_tp_sl (grouped) {symbol} TP@{tp_price} SL@{sl_price}: {result}")
-            return [{'type': 'tpsl_grouped', 'result': result}]
-        
-        # Otherwise, submit individually (fallback)
         results = []
         
-        # Take Profit (reduce only, opposite side)
+        # Set Take Profit using SDK order()
         if tp_price:
-            tp_result = self.exchange.order(
-                name=symbol,
-                is_buy=not is_long,  # Opposite side to close
-                sz=rounded_size,
-                limit_px=round(tp_price, 6),
-                order_type={"trigger": {
-                    "triggerPx": round(tp_price, 6),
-                    "isMarket": True,
-                    "tpsl": "tp"
-                }},
-                reduce_only=True,
-                cloid=self._gen_cloid(),
-            )
-            logger.info(f"set_tp {symbol} @ {tp_price}: {tp_result}")
-            results.append({'type': 'tp', 'result': tp_result})
+            try:
+                tp_result = self.exchange.order(
+                    name=symbol,
+                    is_buy=not is_long,  # Opposite side to close
+                    sz=rounded_size,
+                    limit_px=round(tp_price, 6),
+                    order_type={"trigger": {
+                        "triggerPx": round(tp_price, 6),
+                        "isMarket": True,
+                        "tpsl": "tp"
+                    }},
+                    reduce_only=True,
+                )
+                logger.info(f"✅ TP order placed for {symbol} @ ${tp_price}: {tp_result}")
+                results.append({'type': 'tp', 'result': tp_result})
+            except Exception as e:
+                logger.error(f"❌ TP order failed for {symbol}: {e}")
+                results.append({'type': 'tp', 'error': str(e)})
         
-        # Stop Loss (reduce only, opposite side)
+        # Set Stop Loss using SDK order()
         if sl_price:
-            sl_result = self.exchange.order(
-                name=symbol,
-                is_buy=not is_long,  # Opposite side to close
-                sz=rounded_size,
-                limit_px=round(sl_price, 6),
-                order_type={"trigger": {
-                    "triggerPx": round(sl_price, 6),
-                    "isMarket": True,
-                    "tpsl": "sl"
-                }},
-                reduce_only=True,
-                cloid=self._gen_cloid(),
-            )
-            logger.info(f"set_sl {symbol} @ {sl_price}: {sl_result}")
-            results.append({'type': 'sl', 'result': sl_result})
+            try:
+                sl_result = self.exchange.order(
+                    name=symbol,
+                    is_buy=not is_long,  # Opposite side to close
+                    sz=rounded_size,
+                    limit_px=round(sl_price, 6),
+                    order_type={"trigger": {
+                        "triggerPx": round(sl_price, 6),
+                        "isMarket": True,
+                        "tpsl": "sl"
+                    }},
+                    reduce_only=True,
+                )
+                logger.info(f"✅ SL order placed for {symbol} @ ${sl_price}: {sl_result}")
+                results.append({'type': 'sl', 'result': sl_result})
+            except Exception as e:
+                logger.error(f"❌ SL order failed for {symbol}: {e}")
+                results.append({'type': 'sl', 'error': str(e)})
         
         return results
     
@@ -420,9 +474,13 @@ class HLOrderManager:
         Returns:
             TP/SL order results
         """
+        logger.info(f"🎯 set_position_tpsl called: {symbol} TP=${tp_price} SL=${sl_price}")
+        
         # Get current position
         user_state = self.info.user_state(self.address)
         positions = user_state.get('assetPositions', [])
+        
+        logger.info(f"   Found {len(positions)} asset positions")
         
         position_size = 0.0
         is_long = True
@@ -430,21 +488,29 @@ class HLOrderManager:
         
         for p in positions:
             pos = p.get('position', {})
-            if pos.get('coin') == symbol:
+            coin = pos.get('coin')
+            logger.debug(f"   Checking position: {coin} = {pos}")
+            if coin == symbol:
                 position_size = abs(float(pos.get('szi', 0)))
                 is_long = float(pos.get('szi', 0)) > 0
                 entry_price = float(pos.get('entryPx', 0))
+                logger.info(f"   Found matching position: {symbol} size={position_size} is_long={is_long}")
                 break
         
         if position_size <= 0:
             logger.warning(f"No position to set TP/SL for {symbol}")
-            return {'status': 'error', 'message': 'No position found'}
+            return {'status': 'error', 'message': f'No position found for {symbol}'}
         
         logger.info(f"🎯 Setting TP/SL for {symbol} {'LONG' if is_long else 'SHORT'} {position_size}")
         logger.info(f"   Entry: ${entry_price} | TP: ${tp_price} | SL: ${sl_price}")
         
         # Set TP/SL with proper grouping
-        results = self.set_tp_sl(symbol, position_size, is_long, tp_price, sl_price)
+        try:
+            results = self.set_tp_sl(symbol, position_size, is_long, tp_price, sl_price)
+            logger.info(f"   set_tp_sl results: {results}")
+        except Exception as e:
+            logger.error(f"   set_tp_sl failed: {e}")
+            return {'status': 'error', 'message': str(e), 'error': str(e)}
         
         # Track position
         self.position_orders[symbol] = {
@@ -469,7 +535,8 @@ class HLOrderManager:
                                 tp_price: Optional[float] = None,
                                 sl_price: Optional[float] = None,
                                 slippage: float = 0.01,
-                                use_atomic: bool = True) -> Dict:
+                                use_atomic: bool = False,  # Disable atomic for now - use 2-step
+                                entry_price: Optional[float] = None) -> Dict:
         """
         Open position with market order and set TP/SL.
         
@@ -481,19 +548,22 @@ class HLOrderManager:
             sl_price: Stop loss trigger price
             slippage: Max slippage for entry (default 1%)
             use_atomic: If True, use atomic OCO (all orders in one request)
-                        If False, use two-step (entry first, then TP/SL)
+                        If False, use two-step (entry first, then TP/SL) - DEFAULT
+            entry_price: Specific entry price from strategy (optional)
         """
-        if use_atomic and (tp_price or sl_price):
-            # PREFERRED: Atomic OCO - entry + TP + SL in single request
-            return self.atomic_market_entry_with_tpsl(
-                symbol, is_buy, size, tp_price, sl_price, slippage
-            )
-        
-        # Fallback: Two-step process (entry first, then TP/SL)
-        # Used when no TP/SL specified
+        # For now, always use 2-step approach as atomic has issues
+        # TODO: Fix atomic OCO once we understand the price format issue
         
         # Step 1: Market entry
-        entry_result = self.market_open(symbol, is_buy, size, slippage)
+        if entry_price:
+            # Use provided entry price with small buffer
+            if is_buy:
+                limit_px = round(entry_price * 1.005, 2)  # 0.5% above for buys
+            else:
+                limit_px = round(entry_price * 0.995, 2)  # 0.5% below for sells
+            entry_result = self._market_order_with_price(symbol, is_buy, size, limit_px)
+        else:
+            entry_result = self.market_open(symbol, is_buy, size, slippage)
         
         # Check if entry succeeded
         entry_ok = entry_result.get('status') == 'ok' or 'response' in entry_result
@@ -501,19 +571,25 @@ class HLOrderManager:
             logger.error(f"Entry failed: {entry_result}")
             return entry_result
         
+        # Check for actual fill in response
+        statuses = entry_result.get('response', {}).get('data', {}).get('statuses', [])
+        if statuses and 'error' in statuses[0]:
+            logger.error(f"Entry error: {statuses[0]['error']}")
+            return {'status': 'error', 'message': statuses[0]['error']}
+        
         # Get actual filled size from response
         filled_size = size  # Default to requested
-        statuses = entry_result.get('response', {}).get('data', {}).get('statuses', [])
         if statuses and 'filled' in statuses[0]:
             filled_info = statuses[0]['filled']
             filled_size = float(filled_info.get('totalSz', size))
         
-        logger.info(f"Entry filled: {filled_size} {symbol}")
+        logger.info(f"✅ Entry filled: {filled_size} {symbol}")
         
         # Step 2: Set TP/SL if entry succeeded and we have prices
         tpsl_results = []
         if filled_size > 0 and (tp_price or sl_price):
-            tpsl_results = self.set_tp_sl(symbol, filled_size, is_buy, tp_price, sl_price)
+            logger.info(f"📍 Setting TP/SL: TP=${tp_price}, SL=${sl_price}")
+            tpsl_results = self.set_tp_sl_sdk(symbol, filled_size, is_buy, tp_price, sl_price)
         
         # Track position
         self.position_orders[symbol] = {
@@ -531,7 +607,8 @@ class HLOrderManager:
         }
     
     async def place_market_order_with_stops(self, symbol: str, side: str, size, 
-                                            sl_price=None, tp_price=None) -> Dict:
+                                            sl_price=None, tp_price=None,
+                                            entry_price=None) -> Dict:
         """
         Async wrapper for market_open_with_stops (bot.py compatible).
         Returns dict with 'success' key for bot.py compatibility.
@@ -540,10 +617,11 @@ class HLOrderManager:
         size_float = float(size)
         sl_float = float(sl_price) if sl_price else None
         tp_float = float(tp_price) if tp_price else None
+        entry_float = float(entry_price) if entry_price else None
         
         result = await self._loop.run_in_executor(
             None, 
-            lambda: self.market_open_with_stops(symbol, is_buy, size_float, tp_float, sl_float)
+            lambda: self.market_open_with_stops(symbol, is_buy, size_float, tp_float, sl_float, entry_price=entry_float)
         )
         
         # Convert to bot.py expected format

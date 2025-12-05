@@ -79,10 +79,18 @@ from app.strategies.strategy_manager import StrategyManager
 # Import Position Manager (manages manual orders + early exit)
 from app.portfolio.position_manager import PositionManager
 
+# Import Multi-Asset Manager
+from app.portfolio.multi_asset_manager import MultiAssetManager, get_multi_asset_manager
+
 # Import risk management (consolidated in app/)
 from app.risk.risk_engine import RiskEngine
 from app.risk.kill_switch import KillSwitch
 from app.risk.drawdown_monitor import DrawdownMonitor
+from app.risk.kelly_criterion import KellyCriterion, get_kelly_calculator
+from app.risk.small_account_mode import SmallAccountMode, get_small_account_mode
+
+# Import paper trading
+from app.execution.paper_trading import PaperTradingEngine, is_paper_trading_enabled, get_paper_trading_balance
 
 # Import Telegram bot
 from app.telegram_bot import TelegramBot
@@ -153,12 +161,32 @@ class HyperAIBot:
         # Trading symbol - can be any HyperLiquid asset (BTC, ETH, SOL, MATIC, etc.)
         self.symbol = os.getenv('SYMBOL', 'SOL')
         
+        # TIMEFRAME: Configurable candle timeframe (1m, 5m, 15m)
+        # Higher timeframes = fewer signals but higher quality
+        self.timeframe = os.getenv('TIMEFRAME', '1m')
+        valid_timeframes = ['1m', '5m', '15m', '1h', '4h']
+        if self.timeframe not in valid_timeframes:
+            logger.warning(f"Invalid TIMEFRAME={self.timeframe}, using 1m")
+            self.timeframe = '1m'
+        
+        # MULTI-ASSET TRADING: Trade multiple assets simultaneously
+        self.multi_asset_mode = os.getenv('MULTI_ASSET_MODE', 'false').lower() == 'true'
+        multi_assets_env = os.getenv('MULTI_ASSETS', 'BTC,ETH,SOL')
+        self.multi_assets = [s.strip() for s in multi_assets_env.split(',') if s.strip()]
+        self.max_positions = int(os.getenv('MAX_POSITIONS', '3'))
+        
+        # Multi-asset manager (initialized later if enabled)
+        self.asset_manager: Optional[MultiAssetManager] = None
+        
+        # Strategies per symbol (for multi-asset mode)
+        self.strategies: Dict[str, StrategyManager] = {}
+        
         # Exchange components
         self.client: Optional[HyperLiquidClient] = None
         self.websocket: Optional[HLWebSocket] = None
         self.order_manager: Optional[HLOrderManager] = None
         
-        # Strategy Manager (runs all 4 strategies)
+        # Strategy Manager (runs all 4 strategies) - single symbol mode
         self.strategy: Optional[StrategyManager] = None
         
         # Position Manager (manages manual orders + early exit)
@@ -168,6 +196,16 @@ class HyperAIBot:
         self.risk_engine: Optional[RiskEngine] = None
         self.kill_switch: Optional[KillSwitch] = None
         self.drawdown_monitor: Optional[DrawdownMonitor] = None
+        
+        # Kelly Criterion position sizing
+        self.kelly: Optional[KellyCriterion] = None
+        
+        # Small Account Mode (auto-detected based on balance)
+        self.small_account_mode: Optional[SmallAccountMode] = None
+        
+        # Paper Trading Mode (simulated trades for strategy validation)
+        self.paper_trading: Optional[PaperTradingEngine] = None
+        self.is_paper_trading = is_paper_trading_enabled()
         
         # Telegram bot
         self.telegram_bot: Optional[TelegramBot] = None
@@ -180,6 +218,11 @@ class HyperAIBot:
         # BTC candles for correlation analysis (altcoins only)
         self._btc_candles_cache: List[Dict[str, Any]] = []
         self._last_btc_fetch: Optional[datetime] = None
+        
+        # HTF candles for multi-timeframe confirmation (MANDATORY for pro trading)
+        self._htf_candles_cache: Dict[str, List[Dict[str, Any]]] = {}  # {interval: candles}
+        self._last_htf_fetch: Optional[datetime] = None
+        self._htf_intervals = ['15m', '1h', '4h']  # Always check these before entries
         
         # Phase 5: Shared indicator calculator (eliminates duplicate calculations)
         self.indicator_calc: Optional[IndicatorCalculator] = None
@@ -215,12 +258,28 @@ class HyperAIBot:
         
         logger.info("🤖 HyperAI Bot initialized")
         logger.info(f"   Mode: {self.mode}")
-        logger.info(f"   Symbol: {self.symbol}")
+        logger.info(f"   Timeframe: {self.timeframe}")
+        if self.multi_asset_mode:
+            logger.info(f"   🌐 Multi-Asset Mode: ENABLED")
+            logger.info(f"   Assets: {', '.join(self.multi_assets)}")
+            logger.info(f"   Max Positions: {self.max_positions}")
+        else:
+            logger.info(f"   Symbol: {self.symbol}")
     
     async def initialize(self) -> bool:
         """Initialize all components"""
         try:
             logger.info("🔧 Initializing components...")
+            
+            # Check for Paper Trading Mode first
+            if self.is_paper_trading:
+                paper_balance = get_paper_trading_balance()
+                self.paper_trading = PaperTradingEngine(paper_balance)
+                logger.info("📝 ═══════════════════════════════════════")
+                logger.info("📝 PAPER TRADING MODE ENABLED")
+                logger.info(f"📝 Virtual Balance: ${paper_balance}")
+                logger.info("📝 No real trades will be executed!")
+                logger.info("📝 ═══════════════════════════════════════")
             
             # Load credentials
             account_address = os.getenv('ACCOUNT_ADDRESS')
@@ -251,7 +310,18 @@ class HyperAIBot:
             self.websocket.subscribe_all_mids()  # For price data
             self.websocket.subscribe_user_fills(self._on_fill)
             self.websocket.subscribe_order_updates(self._on_order_update)
-            self.websocket.subscribe_candles(self.symbol, "1m", self._on_new_candle)
+            
+            # Subscribe to candles based on mode
+            if self.multi_asset_mode:
+                # Multi-asset: subscribe to all assets
+                for asset in self.multi_assets:
+                    self.websocket.subscribe_candles(asset, self.timeframe, self._on_new_candle)
+                logger.info(f"📊 Subscribed to {self.timeframe} candles for: {', '.join(self.multi_assets)}")
+            else:
+                # Single symbol mode
+                self.websocket.subscribe_candles(self.symbol, self.timeframe, self._on_new_candle)
+                logger.info(f"📊 Subscribed to {self.timeframe} candles for: {self.symbol}")
+            
             self.websocket.start()
             logger.info("📊 WebSocket subscriptions active")
             
@@ -260,12 +330,32 @@ class HyperAIBot:
             
             # Set leverage from MAX_LEVERAGE in .env
             leverage = int(os.getenv('MAX_LEVERAGE', '5'))
-            self.order_manager.set_leverage(self.symbol, leverage)
-            logger.info(f"⚙️  Leverage set to {leverage}x for {self.symbol}")
             
-            # Initialize strategy manager
-            logger.info(f"🎯 Initializing Strategy Manager for {self.symbol}")
-            self.strategy = StrategyManager(self.symbol)
+            # Initialize strategy manager(s) based on mode
+            if self.multi_asset_mode:
+                # MULTI-ASSET MODE: Create strategy and set leverage for each asset
+                logger.info(f"🌐 Multi-Asset Mode: Initializing {len(self.multi_assets)} assets...")
+                
+                self.asset_manager = get_multi_asset_manager(
+                    enabled_assets=self.multi_assets,
+                    max_positions=self.max_positions
+                )
+                
+                for asset in self.multi_assets:
+                    self.order_manager.set_leverage(asset, leverage)
+                    self.strategies[asset] = StrategyManager(asset)
+                    logger.info(f"   ✅ {asset}: Strategy + {leverage}x leverage")
+                
+                # Use first asset's strategy as default for backward compatibility
+                self.strategy = self.strategies.get(self.multi_assets[0])
+                logger.info(f"🌐 Multi-Asset Mode: {len(self.strategies)} strategies initialized")
+            else:
+                # SINGLE SYMBOL MODE (original behavior)
+                self.order_manager.set_leverage(self.symbol, leverage)
+                logger.info(f"⚙️  Leverage set to {leverage}x for {self.symbol}")
+                
+                logger.info(f"🎯 Initializing Strategy Manager for {self.symbol}")
+                self.strategy = StrategyManager(self.symbol)
             
             # Phase 5: Initialize shared indicator calculator
             self.indicator_calc = IndicatorCalculator()
@@ -273,12 +363,12 @@ class HyperAIBot:
             
             # Phase 6: Initialize Position Manager (manages manual orders + early exit)
             position_manager_config = {
-                'check_interval_seconds': 5,  # Check every 5 seconds
-                'auto_tpsl': True,  # Auto-set TP/SL for manual orders
-                'early_exit': True,  # Early exit on failed setups
-                'health_check': True,  # Monitor position health
-                'trailing_stop': True,  # Enable trailing stops
-                'break_even': True,  # Move SL to break-even
+                'check_interval_seconds': 30,  # Check every 30 seconds (less aggressive)
+                'auto_tpsl': False,  # DISABLED for testing - let signals set TP/SL
+                'early_exit': False,  # DISABLED for testing
+                'health_check': False,  # DISABLED for testing
+                'trailing_stop': False,  # DISABLED for testing
+                'break_even': False,  # DISABLED for testing
                 'default_tp_pct': 3.0,  # Default TP = 3%
                 'default_sl_pct': 1.5,  # Default SL = 1.5%
             }
@@ -288,10 +378,22 @@ class HyperAIBot:
                 strategy=self.strategy,
                 config=position_manager_config
             )
-            logger.info("🎯 Phase 6: Position Manager initialized (manual order management + early exit)")
+            logger.info("🎯 Phase 6: Position Manager initialized (features disabled for testing)")
             
             # Get initial account state
             await self.update_account_state()
+            
+            # Check for small account mode (< $100)
+            self.small_account_mode = get_small_account_mode(self.account_value)
+            if self.small_account_mode and self.small_account_mode.is_small_account:
+                logger.info("💰 SMALL ACCOUNT MODE ACTIVATED")
+                logger.info(f"   Account value: ${self.account_value:.2f}")
+                logger.info(f"   Tier: {self.small_account_mode.tier.upper()}")
+                logger.info(f"   Recommended leverage: {self.small_account_mode.recommended_leverage}x")
+                logger.info(f"   Tradeable assets: {', '.join(self.small_account_mode.get_tradeable_assets()[:3])}")
+                
+                # Apply small account config overrides
+                self.small_account_mode.apply_config()
             
             # Initialize risk management components
             # Create simple AccountManager and PositionManager proxies
@@ -393,10 +495,14 @@ class HyperAIBot:
         try:
             account_state = await self.client.get_account_state()
             
+            old_value = self.account_value
             self.account_value = Decimal(str(account_state['account_value']))
             self.margin_used = Decimal(str(account_state['margin_used']))
             
-            logger.info(f"📊 Account updated: value=${self.account_value:.2f}, margin=${self.margin_used:.2f}")
+            # Only log if significant change (>$0.50) or first update
+            value_change = abs(float(self.account_value - old_value)) if old_value > 0 else 999
+            if value_change > 0.50 or old_value == 0:
+                logger.info(f"📊 Account updated: value=${self.account_value:.2f}, margin=${self.margin_used:.2f}")
             
             # Update peak equity
             if self.account_value > self.peak_equity:
@@ -416,19 +522,34 @@ class HyperAIBot:
         """
         Callback for real-time candle updates (Phase 3 + Phase 4 + Phase 5)
         Triggers indicator recalculation on new candle
+        Supports multi-asset mode
         """
-        if symbol == self.symbol:
-            self._candle_update_pending = True
-            
-            # PHASE 4: Invalidate strategy indicator cache on new candle
-            if hasattr(self.strategy, 'invalidate_indicator_cache'):
-                self.strategy.invalidate_indicator_cache()
-            
-            # PHASE 5: Invalidate shared indicator calculator cache
-            if self.indicator_calc:
-                self.indicator_calc.invalidate_cache()
-            
-            logger.debug(f"🕯️ New candle for {symbol} - invalidated all indicator caches")
+        # Multi-asset mode: update the specific asset's cache
+        if self.multi_asset_mode and self.asset_manager:
+            if symbol in self.multi_assets:
+                self.asset_manager.mark_candle_update_pending(symbol)
+                
+                # Invalidate strategy cache for this symbol
+                if symbol in self.strategies:
+                    strategy = self.strategies[symbol]
+                    if hasattr(strategy, 'invalidate_indicator_cache'):
+                        strategy.invalidate_indicator_cache()
+                
+                logger.debug(f"🕯️ New candle for {symbol} (multi-asset)")
+        else:
+            # Single symbol mode (original behavior)
+            if symbol == self.symbol:
+                self._candle_update_pending = True
+                
+                # PHASE 4: Invalidate strategy indicator cache on new candle
+                if hasattr(self.strategy, 'invalidate_indicator_cache'):
+                    self.strategy.invalidate_indicator_cache()
+                
+                # PHASE 5: Invalidate shared indicator calculator cache
+                if self.indicator_calc:
+                    self.indicator_calc.invalidate_cache()
+                
+                logger.debug(f"🕯️ New candle for {symbol} - invalidated all indicator caches")
     
     def _on_order_update(self, update: Dict[str, Any]):
         """
@@ -499,13 +620,22 @@ class HyperAIBot:
             if cloid and hasattr(self.order_manager, 'track_fill'):
                 self.order_manager.track_fill(cloid, fill)
             
-            # Send Telegram notification for fills
-            if self.telegram_bot:
-                emoji = "🟢" if side == "B" else "🔴"
-                message = f"{emoji} **FILL**\n\n{coin} {side.upper()} {size} @ ${price}"
-                if closed_pnl:
-                    message += f"\n💰 Closed P&L: ${closed_pnl:+.2f}"
-                asyncio.create_task(self._send_order_notification(message))
+            # Schedule Telegram notification for fills (handle no event loop gracefully)
+            if self.telegram_bot and closed_pnl:  # Only notify on closes with P&L
+                try:
+                    emoji = "🟢" if side == "B" else "🔴"
+                    pnl_emoji = "✅" if closed_pnl > 0 else "❌"
+                    message = f"{emoji} **FILL**\n\n{coin} {side.upper()} {size} @ ${price}\n{pnl_emoji} Closed P&L: ${closed_pnl:+.2f}"
+                    
+                    # Try to get running loop, if not available just skip notification
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(self._send_order_notification(message))
+                    except RuntimeError:
+                        # No running event loop - skip async notification
+                        pass
+                except Exception:
+                    pass
                 
         except Exception as e:
             logger.error(f"Error in fill callback: {e}")
@@ -575,13 +705,13 @@ class HyperAIBot:
                 unrealized_pnl_pct = (unrealized_pnl / (abs(Decimal(str(size))) * entry_price)) * 100
                 current_price = Decimal(str(pos.get('mark_price', entry_price)))  # Use mark price
                 
-                # Log position status every 10 loops for visibility
+                # Log position status every 60 loops (~1 min) for cleaner logs
                 if hasattr(self, '_position_log_counter'):
                     self._position_log_counter += 1
                 else:
                     self._position_log_counter = 1
                 
-                if self._position_log_counter % 10 == 0:
+                if self._position_log_counter % 60 == 0:
                     logger.info(f"📈 Active position: {symbol} | Size: {size:.2f} | "
                                f"Entry: ${entry_price:.3f} | Current: ${current_price:.3f} | P&L: ${unrealized_pnl:+.2f} ({unrealized_pnl_pct:+.1f}%)")
                 
@@ -700,6 +830,85 @@ class HyperAIBot:
         except Exception as e:
             logger.error(f"Error monitoring positions: {e}", exc_info=True)
     
+    async def _scan_multi_asset_signals(self, account_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Scan all enabled assets for trading signals (multi-asset mode)
+        
+        Uses round-robin scanning to give each asset fair opportunity.
+        Only scans assets without open positions.
+        
+        Returns:
+            Signal dict if found, None otherwise
+        """
+        if not self.asset_manager:
+            return None
+        
+        # Update asset manager with current positions
+        self.asset_manager.update_from_account_state(account_state)
+        
+        # Check if we can open more positions
+        if not self.asset_manager.can_open_new_position():
+            return None
+        
+        # Get assets available for trading
+        available = self.asset_manager.get_assets_without_positions()
+        if not available:
+            return None
+        
+        now = datetime.now(timezone.utc)
+        
+        # Scan each available asset
+        for symbol in available:
+            can_trade, reason = self.asset_manager.can_trade_asset(symbol)
+            if not can_trade:
+                logger.debug(f"⏭️ Skip {symbol}: {reason}")
+                continue
+            
+            # Get strategy for this symbol
+            strategy = self.strategies.get(symbol)
+            if not strategy:
+                logger.warning(f"No strategy for {symbol}")
+                continue
+            
+            # Get market data
+            market_data = self.websocket.get_market_data(symbol)
+            if not market_data or not market_data.get('price'):
+                continue
+            
+            # Fetch candles if needed (using configured timeframe)
+            if self.asset_manager.needs_candle_refresh(symbol):
+                candles = self.client.get_candles(symbol, self.timeframe, 150)
+                if candles:
+                    self.asset_manager.update_candles(symbol, candles)
+            
+            # Get cached candles
+            candles = self.asset_manager.get_candles(symbol)
+            if not candles:
+                continue
+            
+            market_data['candles'] = candles
+            
+            # Update BTC candles for correlation (non-BTC assets)
+            if symbol != 'BTC' and hasattr(strategy, 'update_btc_candles'):
+                if self._btc_candles_cache:
+                    strategy.update_btc_candles(self._btc_candles_cache)
+            
+            # Generate signal
+            try:
+                signal = await strategy.generate_signal(market_data, account_state)
+                
+                if signal:
+                    # Record signal time for cooldown
+                    self.asset_manager.record_signal(symbol)
+                    logger.info(f"🌐 Multi-Asset Signal: {symbol} {signal.get('signal_type', 'UNKNOWN')}")
+                    return signal
+                    
+            except Exception as e:
+                logger.error(f"Error generating signal for {symbol}: {e}")
+                continue
+        
+        return None
+
     async def run_trading_loop(self):
         """Main trading loop"""
         logger.info("🚀 Starting trading loop...")
@@ -770,19 +979,19 @@ class HyperAIBot:
                     
                     if need_initial_fetch or need_fallback_fetch:
                         # Initial fetch or fallback if WebSocket not providing candles
-                        candles = self.client.get_candles(self.symbol, '1m', 150)
+                        candles = self.client.get_candles(self.symbol, self.timeframe, 150)
                         if candles:
                             self._candles_cache = candles
                             self._last_candle_fetch = now
-                            logger.debug(f"📊 Fetched candles via API: {len(candles)} bars (fallback)")
+                            logger.debug(f"📊 Fetched {self.timeframe} candles via API: {len(candles)} bars (fallback)")
                     elif self._candle_update_pending:
                         # WebSocket provided new candle - just refresh the cache
-                        candles = self.client.get_candles(self.symbol, '1m', 150)
+                        candles = self.client.get_candles(self.symbol, self.timeframe, 150)
                         if candles:
                             self._candles_cache = candles
                             self._last_candle_fetch = now
                             self._candle_update_pending = False
-                            logger.debug(f"📊 Updated candles on new bar: {len(candles)} bars")
+                            logger.debug(f"📊 Updated {self.timeframe} candles on new bar: {len(candles)} bars")
                     
                     # WORLD-CLASS: Fetch BTC candles for correlation analysis (altcoins only)
                     if self.symbol != 'BTC' and hasattr(self.strategy, 'update_btc_candles'):
@@ -793,18 +1002,48 @@ class HyperAIBot:
                         )
                         if btc_need_fetch:
                             try:
-                                btc_candles = self.client.get_candles('BTC', '1m', 50)
+                                btc_candles = self.client.get_candles('BTC', self.timeframe, 50)
                                 if btc_candles:
                                     self._btc_candles_cache = btc_candles
                                     self._last_btc_fetch = now
                                     self.strategy.update_btc_candles(btc_candles)
-                                    logger.debug(f"₿ Updated BTC candles: {len(btc_candles)} bars")
+                                    logger.debug(f"₿ Updated BTC {self.timeframe} candles: {len(btc_candles)} bars")
                             except Exception as e:
                                 logger.debug(f"Failed to fetch BTC candles: {e}")
+                    
+                    # PRO TRADING: Fetch HTF candles for multi-timeframe confirmation (MANDATORY)
+                    # Only fetch if LTF is short-term (1m, 5m) - no need if already on 1h/4h
+                    if self.timeframe in ['1m', '5m', '15m']:
+                        htf_need_fetch = (
+                            not self._htf_candles_cache or 
+                            not self._last_htf_fetch or
+                            (now - self._last_htf_fetch).total_seconds() > 900  # 15 min refresh
+                        )
+                        if htf_need_fetch:
+                            try:
+                                for interval in self._htf_intervals:
+                                    # Skip if HTF equals our LTF
+                                    if interval == self.timeframe:
+                                        continue
+                                    htf_candles = self.client.get_candles(self.symbol, interval, 50)
+                                    if htf_candles:
+                                        self._htf_candles_cache[interval] = htf_candles
+                                self._last_htf_fetch = now
+                                logger.debug(f"📊 Updated HTF candles: {list(self._htf_candles_cache.keys())}")
+                            except Exception as e:
+                                logger.debug(f"Failed to fetch HTF candles: {e}")
                     
                     # Always use cached candles for strategies
                     if self._candles_cache:
                         market_data['candles'] = self._candles_cache
+                    
+                    # Add HTF candles to market_data for multi-timeframe analysis (MANDATORY)
+                    if self._htf_candles_cache:
+                        market_data['htf_candles'] = self._htf_candles_cache
+                    
+                    # Add BTC candles to market_data for correlation analysis
+                    if self._btc_candles_cache:
+                        market_data['btc_candles'] = self._btc_candles_cache
                     
                     # Update account state
                     await self.update_account_state()
@@ -815,39 +1054,74 @@ class HyperAIBot:
                     # Monitor active positions for SL/TP hits
                     await self._monitor_positions(account_state)
                     
+                    # PAPER TRADING: Update paper positions with current prices
+                    if self.is_paper_trading and self.paper_trading:
+                        current_prices = {}
+                        for symbol in self.paper_trading.positions.keys():
+                            md = self.websocket.get_market_data(symbol)
+                            if md and md.get('price'):
+                                current_prices[symbol] = Decimal(str(md['price']))
+                        
+                        closed_trades = self.paper_trading.update_positions(current_prices)
+                        for trade in closed_trades:
+                            emoji = "🟢" if trade.pnl > 0 else "🔴"
+                            logger.info(f"📝 [PAPER] {emoji} Position closed: {trade.symbol} P&L: ${trade.pnl:.2f}")
+                            if self.telegram_bot:
+                                try:
+                                    await self.telegram_bot.send_message(
+                                        f"📝 **PAPER TRADE CLOSED**\n"
+                                        f"{emoji} {trade.side.upper()} {trade.symbol}\n"
+                                        f"P&L: ${float(trade.pnl):.2f} ({float(trade.pnl_pct):+.2f}%)\n"
+                                        f"Reason: {trade.exit_reason}"
+                                    )
+                                except:
+                                    pass
+                    
                     # Skip signal generation if paused
                     if self.is_paused:
                         await asyncio.sleep(2)
                         continue
                     
-                    # **CRITICAL**: Skip signal generation if position already open (max 1 position)
-                    positions = account_state.get('positions', [])
-                    has_open_position = any(float(pos.get('size', 0)) != 0 for pos in positions)
+                    # ========== SIGNAL GENERATION (Single vs Multi-Asset Mode) ==========
+                    signal = None
+                    active_strategy = self.strategy  # Default strategy
                     
-                    if has_open_position:
-                        # Don't generate new signals while position is active
-                        await asyncio.sleep(1)
-                        continue
-                    
-                    # PHASE 5: Calculate indicators once using shared calculator
-                    if self._candles_cache and self.indicator_calc:
-                        # Extract prices from candles
-                        prices_list = [Decimal(str(c['close'])) for c in self._candles_cache]
-                        volumes_list = [Decimal(str(c['volume'])) for c in self._candles_cache]
+                    if self.multi_asset_mode:
+                        # MULTI-ASSET MODE: Scan all enabled assets for signals
+                        signal = await self._scan_multi_asset_signals(account_state)
                         
-                        # Calculate all indicators once
-                        shared_indicators = self.indicator_calc.calculate_all(prices_list, volumes_list)
+                        if signal:
+                            # Get the strategy that generated this signal
+                            signal_symbol = signal.get('symbol', self.symbol)
+                            active_strategy = self.strategies.get(signal_symbol, self.strategy)
+                    else:
+                        # SINGLE SYMBOL MODE (original behavior)
+                        # Skip if position already open (max 1 position in single mode)
+                        positions = account_state.get('positions', [])
+                        has_open_position = any(float(pos.get('size', 0)) != 0 for pos in positions)
                         
-                        # Add to market_data
-                        market_data['indicators'] = shared_indicators
+                        if has_open_position:
+                            # Don't generate new signals while position is active
+                            await asyncio.sleep(1)
+                            continue
                         
-                        # PHASE 5 Part 2: Extract ATR for adaptive position monitoring
-                        self._atr_value = shared_indicators.get('atr')
+                        # PHASE 5: Calculate indicators once using shared calculator
+                        if self._candles_cache and self.indicator_calc:
+                            # Extract prices from candles
+                            prices_list = [Decimal(str(c['close'])) for c in self._candles_cache]
+                            volumes_list = [Decimal(str(c['volume'])) for c in self._candles_cache]
+                            
+                            # Calculate all indicators once
+                            shared_indicators = self.indicator_calc.calculate_all(prices_list, volumes_list)
+                            
+                            # Add to market_data
+                            market_data['indicators'] = shared_indicators
+                            
+                            # PHASE 5 Part 2: Extract ATR for adaptive position monitoring
+                            self._atr_value = shared_indicators.get('atr')
                         
-                        logger.debug("📊 Phase 5: Using shared indicators")
-                    
-                    # Generate signal from strategy (now uses shared indicators)
-                    signal = await self.strategy.generate_signal(market_data, account_state)
+                        # Generate signal from strategy (single symbol mode)
+                        signal = await self.strategy.generate_signal(market_data, account_state)
                     
                     if signal:
                         # Send Telegram notification for new signal
@@ -867,11 +1141,14 @@ class HyperAIBot:
                         
                         if is_valid:
                             # **REVALIDATE SIGNAL** - Check if still valid before execution
-                            current_price = Decimal(str(market_data.get('price', signal['entry_price'])))
+                            # Get market data for the signal's symbol (may differ in multi-asset mode)
+                            signal_symbol = signal.get('symbol', self.symbol)
+                            signal_market_data = self.websocket.get_market_data(signal_symbol) or market_data
+                            current_price = Decimal(str(signal_market_data.get('price', signal['entry_price'])))
                             
-                            # Check if strategy has revalidation method
-                            if hasattr(self.strategy, 'revalidate_signal'):
-                                if not self.strategy.revalidate_signal(signal, current_price):
+                            # Check if strategy has revalidation method (use active_strategy in multi-asset)
+                            if hasattr(active_strategy, 'revalidate_signal'):
+                                if not active_strategy.revalidate_signal(signal, current_price):
                                     logger.warning(f"🚫 Signal invalidated before execution - market conditions changed")
                                     await asyncio.sleep(1)
                                     continue
@@ -879,19 +1156,71 @@ class HyperAIBot:
                             # Execute trade using V3 atomic TPSL (bulk_orders with grouping='normalTpsl')
                             logger.info(f"🎯 Executing {signal['signal_type']} signal with ATOMIC TPSL")
                             
+                            # PAPER TRADING: Simulate trade instead of real execution
+                            if self.is_paper_trading and self.paper_trading:
+                                paper_result = self.paper_trading.open_position(
+                                    symbol=signal['symbol'],
+                                    side='long' if signal['side'].lower() == 'buy' else 'short',
+                                    size=Decimal(str(signal['size'])),
+                                    entry_price=Decimal(str(signal['entry_price'])),
+                                    stop_loss=Decimal(str(signal['stop_loss'])),
+                                    take_profit=Decimal(str(signal['take_profit'])),
+                                    leverage=int(os.getenv('MAX_LEVERAGE', '5')),
+                                )
+                                
+                                if paper_result.get('success'):
+                                    self.trades_executed += 1
+                                    active_strategy.record_trade_execution(signal, {'success': True, 'paper': True})
+                                    logger.info(f"📝 [PAPER] Trade executed: {signal['signal_type']} {signal['symbol']}")
+                                    
+                                    if self.telegram_bot:
+                                        try:
+                                            await self.telegram_bot.send_message(
+                                                f"📝 **PAPER TRADE**\n"
+                                                f"{signal['signal_type']} {signal['symbol']}\n"
+                                                f"Entry: ${signal['entry_price']:.4f}\n"
+                                                f"Size: {signal['size']}\n"
+                                                f"SL: ${signal['stop_loss']:.4f} | TP: ${signal['take_profit']:.4f}"
+                                            )
+                                        except:
+                                            pass
+                                else:
+                                    logger.warning(f"📝 [PAPER] Trade failed: {paper_result.get('error')}")
+                                
+                                await asyncio.sleep(1)
+                                continue
+                            
+                            # REAL TRADING: Execute actual order
                             result = await self.order_manager.place_market_order_with_stops(
                                 symbol=signal['symbol'],
                                 side=signal['side'].lower(),
                                 size=Decimal(str(signal['size'])),
                                 sl_price=Decimal(str(signal['stop_loss'])),
-                                tp_price=Decimal(str(signal['take_profit']))
+                                tp_price=Decimal(str(signal['take_profit'])),
+                                entry_price=Decimal(str(signal['entry_price']))
                             )
                             
                             if result.get('success'):
                                 self.trades_executed += 1
                                 self.risk_engine.record_trade()
                                 self.kill_switch.record_trade(True)
-                                self.strategy.record_trade_execution(signal, result)
+                                active_strategy.record_trade_execution(signal, result)
+                                
+                                # Update multi-asset manager if in multi-asset mode
+                                if self.multi_asset_mode and self.asset_manager:
+                                    position_side = 'long' if signal['side'].lower() == 'buy' else 'short'
+                                    self.asset_manager.update_position_state(
+                                        signal['symbol'],
+                                        has_position=True,
+                                        side=position_side,
+                                        size=Decimal(str(signal['size'])),
+                                        entry_price=Decimal(str(signal['entry_price']))
+                                    )
+                                
+                                # Mark position as bot-created for tracking
+                                if self.position_manager:
+                                    position_side = 'long' if signal['side'].lower() == 'buy' else 'short'
+                                    self.position_manager.mark_position_as_bot_created(signal['symbol'], position_side)
                                 
                                 # Send Telegram notification for successful fill
                                 if self.telegram_bot:
@@ -1012,10 +1341,26 @@ class HyperAIBot:
     async def log_trade_for_ai(self, signal: Dict, result: Dict, market_data: Dict):
         """Log trade data for AI training"""
         try:
+            # Convert signal Decimals to float for JSON serialization
+            safe_signal = {}
+            for k, v in signal.items():
+                if isinstance(v, Decimal):
+                    safe_signal[k] = float(v)
+                else:
+                    safe_signal[k] = v
+            
+            # Convert result Decimals to float
+            safe_result = {}
+            for k, v in result.items():
+                if isinstance(v, Decimal):
+                    safe_result[k] = float(v)
+                else:
+                    safe_result[k] = v
+            
             trade_record = {
                 'timestamp': datetime.now(timezone.utc).isoformat(),
-                'signal': signal,
-                'result': result,
+                'signal': safe_signal,
+                'result': safe_result,
                 'market_data': market_data,
                 'account_state': {
                     'equity': float(self.account_value),

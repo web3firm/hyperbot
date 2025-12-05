@@ -172,6 +172,21 @@ class HyperLiquidClient:
             return [o for o in orders if o.get("coin") == symbol]
         return orders
     
+    def get_frontend_open_orders(self, symbol: Optional[str] = None) -> List[Dict]:
+        """
+        Get open orders with detailed frontend info including TP/SL flags.
+        
+        Returns orders with:
+        - isPositionTpsl: bool - True if this is a position TP/SL
+        - isTrigger: bool - True if trigger order
+        - triggerPx: trigger price
+        - triggerCondition: "gt" or "lt"
+        """
+        orders = self.info.frontend_open_orders(self.address)
+        if symbol:
+            return [o for o in orders if o.get("coin") == symbol]
+        return orders
+    
     def get_candles(self, symbol: str, interval: str = "1m", limit: int = 100) -> List[Dict]:
         """
         Get historical candles from API.

@@ -13,14 +13,19 @@ whether opened by the bot or manually by the user.
 """
 
 import asyncio
+import json
 import logging
 from decimal import Decimal
 from typing import Dict, Any, Optional, List, Set
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# File to persist bot position tracking across restarts
+BOT_POSITIONS_FILE = Path("data/bot_positions.json")
 
 
 class PositionHealth(Enum):
@@ -115,6 +120,9 @@ class PositionManager:
         # Managed positions
         self.positions: Dict[str, ManagedPosition] = {}
         self.known_position_ids: Set[str] = set()
+        
+        # Load persisted bot positions from file
+        self._load_bot_positions()
         
         # Configuration
         self.auto_tpsl_enabled = self.config.get('auto_tpsl', True)
@@ -232,6 +240,9 @@ class PositionManager:
             for pos_key in closed_symbols:
                 logger.info(f"📤 Position closed: {pos_key}")
                 del self.positions[pos_key]
+                # Also remove from known bot positions
+                symbol, side = pos_key.rsplit('_', 1)
+                self.unmark_position(symbol, side)
             
             return new_positions
             
@@ -278,12 +289,65 @@ class PositionManager:
     async def _set_position_protection(self, position: ManagedPosition):
         """Set TP/SL on unprotected position"""
         try:
-            # Check if position already has TP/SL orders
-            open_orders = self.client.get_open_orders(position.symbol)
-            has_tp = any(o.get('orderType', '').lower() == 'tp' or 'take' in o.get('orderType', '').lower() 
-                        for o in open_orders)
-            has_sl = any(o.get('orderType', '').lower() == 'sl' or 'stop' in o.get('orderType', '').lower()
-                        for o in open_orders)
+            # Use frontend_open_orders for better TP/SL detection
+            # It returns isPositionTpsl and isTrigger flags
+            if hasattr(self.client, 'get_frontend_open_orders'):
+                open_orders = self.client.get_frontend_open_orders(position.symbol)
+            else:
+                open_orders = self.client.get_open_orders(position.symbol)
+            
+            # Debug logging
+            logger.info(f"🔍 Checking orders for {position.symbol}: {len(open_orders)} orders found")
+            
+            # Check for TP/SL using multiple detection methods
+            has_tp = False
+            has_sl = False
+            
+            for o in open_orders:
+                # Method 1: Check isPositionTpsl flag (best method)
+                if o.get('isPositionTpsl', False) and o.get('isTrigger', False):
+                    trigger_cond = o.get('triggerCondition', '')
+                    order_side = o.get('side', '')  # 'A' = sell, 'B' = buy
+                    
+                    # For LONG: TP is sell above (triggerCondition='gt'), SL is sell below (triggerCondition='lt')
+                    # For SHORT: TP is buy below (triggerCondition='lt'), SL is buy above (triggerCondition='gt')
+                    if position.side == 'long':
+                        if order_side == 'A' and trigger_cond == 'gt':  # Sell above = TP
+                            has_tp = True
+                        elif order_side == 'A' and trigger_cond == 'lt':  # Sell below = SL
+                            has_sl = True
+                    else:  # short
+                        if order_side == 'B' and trigger_cond == 'lt':  # Buy below = TP
+                            has_tp = True
+                        elif order_side == 'B' and trigger_cond == 'gt':  # Buy above = SL
+                            has_sl = True
+                
+                # Method 2: Check orderType dict (trigger format)
+                order_type = o.get('orderType', '')
+                if isinstance(order_type, dict):
+                    trigger = order_type.get('trigger', {})
+                    tpsl = trigger.get('tpsl', '')
+                    if tpsl == 'tp':
+                        has_tp = True
+                    elif tpsl == 'sl':
+                        has_sl = True
+                elif isinstance(order_type, str):
+                    order_type_lower = order_type.lower()
+                    if 'tp' in order_type_lower or 'take profit' in order_type_lower:
+                        has_tp = True
+                    elif 'sl' in order_type_lower or 'stop loss' in order_type_lower:
+                        has_sl = True
+                
+                # Method 3: Check children orders (grouped orders)
+                children = o.get('children', [])
+                for child in children:
+                    child_type = child.get('orderType', '').lower() if isinstance(child.get('orderType'), str) else ''
+                    if 'tp' in child_type:
+                        has_tp = True
+                    elif 'sl' in child_type:
+                        has_sl = True
+            
+            logger.info(f"   TP exists: {has_tp}, SL exists: {has_sl}")
             
             if has_tp and has_sl:
                 position.managed_by_bot = True
@@ -330,11 +394,13 @@ class PositionManager:
                 # Profit threshold reached - move SL to entry
                 entry = position.entry_price
                 
-                # Add small buffer (0.1%) to ensure we don't get stopped at exact entry
+                # Add small buffer (0.1%) to lock in a tiny profit
+                # For LONG: SL slightly above entry (triggers if price drops to entry)
+                # For SHORT: SL slightly below entry (triggers if price rises to entry)
                 if position.side == 'long':
-                    new_sl = entry * 1.001  # Just above entry
+                    new_sl = entry * 1.001  # Slightly above entry
                 else:
-                    new_sl = entry * 0.999  # Just below entry
+                    new_sl = entry * 1.001  # For SHORT: slightly ABOVE entry (exit when price rises back)
                 
                 logger.info(f"🔒 Break-even activated for {position.symbol}")
                 logger.info(f"   Profit: {position.unrealized_pnl_pct:.2f}%")
@@ -381,15 +447,17 @@ class PositionManager:
                     self.order_manager.set_position_tpsl(position.symbol, sl_price=new_sl)
                     position.sl_price = new_sl
             else:
-                # For shorts, update lowest price
+                # For shorts, update lowest price (our best profit point)
                 if current_price < position.lowest_price:
                     position.lowest_price = current_price
                 
-                # New SL trails above lowest
+                # For SHORT: SL trails ABOVE the lowest price (locks in profit as price drops)
+                # The SL is a BUY order that triggers if price rises
                 new_sl = position.lowest_price + trail_distance
                 
-                # Only move SL down for shorts
-                if position.sl_price and new_sl < position.sl_price:
+                # For shorts, we move SL DOWN as price drops (tightening the stop)
+                # But new_sl must still be ABOVE current price to be valid
+                if new_sl > current_price and position.sl_price and new_sl < position.sl_price:
                     logger.info(f"📉 Trailing SL down: ${position.sl_price:.4f} → ${new_sl:.4f}")
                     self.order_manager.set_position_tpsl(position.symbol, sl_price=new_sl)
                     position.sl_price = new_sl
@@ -618,10 +686,44 @@ class PositionManager:
             logger.error(f"Error validating entry: {e}")
             return {'valid': True, 'score': 50, 'feedback': [f'Error: {e}']}
     
+    def _load_bot_positions(self):
+        """Load bot position tracking from persistent storage"""
+        try:
+            if BOT_POSITIONS_FILE.exists():
+                with open(BOT_POSITIONS_FILE, 'r') as f:
+                    data = json.load(f)
+                    self.known_position_ids = set(data.get('known_position_ids', []))
+                    logger.info(f"📂 Loaded {len(self.known_position_ids)} known bot positions from file")
+        except Exception as e:
+            logger.warning(f"Could not load bot positions file: {e}")
+            self.known_position_ids = set()
+    
+    def _save_bot_positions(self):
+        """Save bot position tracking to persistent storage"""
+        try:
+            BOT_POSITIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(BOT_POSITIONS_FILE, 'w') as f:
+                json.dump({
+                    'known_position_ids': list(self.known_position_ids),
+                    'updated_at': datetime.now(timezone.utc).isoformat()
+                }, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Could not save bot positions file: {e}")
+    
     def mark_position_as_bot_created(self, symbol: str, side: str):
-        """Mark a position as created by the bot (not manual)"""
+        """Mark a position as created by the bot (not manual) and persist"""
         pos_key = f"{symbol}_{side}"
         self.known_position_ids.add(pos_key)
+        self._save_bot_positions()
+        logger.info(f"🤖 Marked {pos_key} as bot-created position")
+    
+    def unmark_position(self, symbol: str, side: str):
+        """Remove position from known bot positions (when closed)"""
+        pos_key = f"{symbol}_{side}"
+        if pos_key in self.known_position_ids:
+            self.known_position_ids.discard(pos_key)
+            self._save_bot_positions()
+            logger.info(f"📤 Removed {pos_key} from bot positions tracking")
     
     def get_position_status(self, symbol: str = None) -> List[Dict]:
         """Get status of all managed positions"""

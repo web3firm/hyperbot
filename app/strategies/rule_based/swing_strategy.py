@@ -27,6 +27,7 @@ from app.strategies.adaptive.multi_timeframe import MultiTimeframeAnalyzer
 from app.strategies.adaptive.order_flow import OrderFlowAnalyzer
 from app.strategies.adaptive.session_manager import SessionManager
 from app.strategies.adaptive.adaptive_risk import AdaptiveRiskManager
+from app.strategies.adaptive.pro_filters import ProTradingFilters
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,7 @@ class SwingStrategy:
         self.order_flow = OrderFlowAnalyzer()
         self.session_manager = SessionManager()
         self.risk_manager = AdaptiveRiskManager()
+        self.pro_filters = ProTradingFilters(symbol)  # Professional trading filters
         
         # State tracking - BE PATIENT, DON'T OVERTRADE
         self.last_signal_time: Optional[datetime] = None
@@ -232,6 +234,23 @@ class SwingStrategy:
         if not should_trade:
             logger.debug(f"❌ Signal rejected: {session_reason}")
             return None
+        
+        # ==================== PRO TRADING FILTERS ====================
+        # Final quality gate - professional-level confirmation
+        
+        btc_candles = market_data.get('btc_candles')  # BTC correlation check
+        pro_result = self.pro_filters.check_all(
+            direction=direction,
+            candles=candles,
+            indicators=indicators,
+            btc_candles=btc_candles,
+        )
+        
+        if not pro_result.passed:
+            logger.debug(f"❌ Signal rejected by pro filter: {pro_result.reason}")
+            return None
+        
+        logger.info(f"✅ Pro filters passed: {pro_result.reason} (confidence: {pro_result.confidence:.1%})")
         
         # ==================== RISK CALCULATION ====================
         
