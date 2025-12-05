@@ -69,6 +69,93 @@ class ProTradingFilters:
         logger.info(f"   HTF Min Alignment: {self.htf_min_alignment*100:.0f}%")
         logger.info(f"   Momentum Alignment: {'Required' if self.require_all_momentum_agree else 'Optional'}")
     
+    def check_all(
+        self,
+        direction: str,
+        candles: List[Dict],
+        indicators: Dict[str, Any],
+        btc_candles: Optional[List[Dict]] = None,
+    ) -> 'FilterResult':
+        """
+        Simplified check_all method for swing strategy integration.
+        
+        Args:
+            direction: 'long' or 'short'
+            candles: Current timeframe candles
+            indicators: Calculated indicators
+            btc_candles: BTC candles for correlation check
+        
+        Returns:
+            FilterResult with passed, reason, confidence
+        """
+        from dataclasses import dataclass
+        
+        @dataclass
+        class FilterResult:
+            passed: bool
+            reason: str
+            confidence: float = 0.5
+        
+        checks_passed = 0
+        total_checks = 0
+        reasons = []
+        
+        # 1. Volatility Check
+        atr = indicators.get('atr')
+        if atr:
+            total_checks += 1
+            vol_passed, vol_reason, vol_regime = self.check_volatility_regime(float(atr))
+            if vol_passed:
+                checks_passed += 1
+            else:
+                reasons.append(vol_reason)
+                # Extreme volatility is a hard reject
+                if vol_regime == VolatilityRegime.EXTREME or vol_regime == VolatilityRegime.TOO_LOW:
+                    return FilterResult(False, vol_reason, 0.0)
+        
+        # 2. Momentum Check
+        total_checks += 1
+        mom_passed, mom_reason = self.check_momentum_alignment(direction, indicators)
+        if mom_passed:
+            checks_passed += 1
+        else:
+            reasons.append(mom_reason)
+        
+        # 3. BTC Correlation Check (for altcoins)
+        if btc_candles and self.symbol != 'BTC' and len(btc_candles) >= 2:
+            total_checks += 1
+            # Calculate BTC change
+            btc_current = float(btc_candles[-1].get('close', btc_candles[-1].get('c', 0)))
+            btc_prev = float(btc_candles[-2].get('close', btc_candles[-2].get('c', 0)))
+            btc_change_pct = ((btc_current / btc_prev) - 1) * 100 if btc_prev > 0 else 0
+            
+            corr_passed, corr_reason = self.check_btc_correlation(direction, btc_change_pct)
+            if corr_passed:
+                checks_passed += 1
+            else:
+                reasons.append(corr_reason)
+                # Strong BTC divergence is a hard reject
+                if abs(btc_change_pct) > 2.0:
+                    return FilterResult(False, corr_reason, 0.0)
+        
+        # 4. Time Filter
+        total_checks += 1
+        time_passed, time_reason = self.check_time_filter(datetime.now(timezone.utc))
+        if time_passed:
+            checks_passed += 1
+        else:
+            reasons.append(time_reason)
+        
+        # Calculate confidence
+        confidence = checks_passed / total_checks if total_checks > 0 else 0.5
+        
+        # Require at least 60% of checks to pass
+        if confidence >= 0.6:
+            return FilterResult(True, f"Passed {checks_passed}/{total_checks} filters", confidence)
+        else:
+            reason_str = "; ".join(reasons[:2]) if reasons else "Insufficient confluence"
+            return FilterResult(False, reason_str, confidence)
+    
     def check_all_filters(
         self,
         direction: str,  # 'long' or 'short'
