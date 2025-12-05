@@ -177,12 +177,16 @@ class HLOrderManager:
         if entry_price:
             # Use the strategy's entry price - add small buffer for execution
             if is_buy:
-                entry_px = round(entry_price * 1.002, 2)  # 0.2% above for buys
+                entry_px = self.client.round_price(symbol, entry_price * 1.002)  # 0.2% above for buys
             else:
-                entry_px = round(entry_price * 0.998, 2)  # 0.2% below for sells
+                entry_px = self.client.round_price(symbol, entry_price * 0.998)  # 0.2% below for sells
         else:
             # Fallback: calculate from current mid with slippage
-            entry_px = round(mid * (1 + slippage) if is_buy else mid * (1 - slippage), 2)
+            entry_px = self.client.round_price(symbol, mid * (1 + slippage) if is_buy else mid * (1 - slippage))
+        
+        # Round TP/SL prices to valid tick sizes
+        tp_px = self.client.round_price(symbol, tp_price) if tp_price else None
+        sl_px = self.client.round_price(symbol, sl_price) if sl_price else None
         
         orders = []
         
@@ -199,14 +203,14 @@ class HLOrderManager:
         orders.append(entry_order)
         
         # Order 1: Take Profit (reduce-only, opposite side)
-        if tp_price:
+        if tp_px:
             tp_order = {
                 "coin": symbol,
                 "is_buy": not is_buy,  # Opposite side to close
                 "sz": rounded_size,
-                "limit_px": round(tp_price, 6),
+                "limit_px": tp_px,
                 "order_type": {"trigger": {
-                    "triggerPx": round(tp_price, 6),
+                    "triggerPx": tp_px,
                     "isMarket": True,
                     "tpsl": "tp"
                 }},
@@ -216,14 +220,14 @@ class HLOrderManager:
             orders.append(tp_order)
         
         # Order 2: Stop Loss (reduce-only, opposite side)
-        if sl_price:
+        if sl_px:
             sl_order = {
                 "coin": symbol,
                 "is_buy": not is_buy,  # Opposite side to close
                 "sz": rounded_size,
-                "limit_px": round(sl_price, 6),
+                "limit_px": sl_px,
                 "order_type": {"trigger": {
-                    "triggerPx": round(sl_price, 6),
+                    "triggerPx": sl_px,
                     "isMarket": True,
                     "tpsl": "sl"
                 }},
@@ -233,10 +237,10 @@ class HLOrderManager:
             orders.append(sl_order)
         
         logger.info(f"🎯 ATOMIC OCO: {symbol} {'LONG' if is_buy else 'SHORT'} {rounded_size}")
-        logger.info(f"   Entry: ${entry_px} | TP: ${tp_price} | SL: ${sl_price}")
+        logger.info(f"   Entry: ${entry_px} | TP: ${tp_px} | SL: ${sl_px}")
         
         # Submit with normalTpsl grouping for OCO behavior
-        grouping = "normalTpsl" if (tp_price or sl_price) else "na"
+        grouping = "normalTpsl" if (tp_px or sl_px) else "na"
         result = self.bulk_orders_with_grouping(orders, grouping=grouping)
         
         # Track position
@@ -245,8 +249,8 @@ class HLOrderManager:
                 'size': rounded_size,
                 'is_buy': is_buy,
                 'entry_price': entry_px,
-                'tp_price': tp_price,
-                'sl_price': sl_price,
+                'tp_price': tp_px,
+                'sl_price': sl_px,
             }
         
         return result
@@ -267,8 +271,8 @@ class HLOrderManager:
             logger.error(f"Invalid mid price for {symbol}: {mid}")
             return {'status': 'error', 'message': 'Invalid mid price'}
         
-        # Calculate limit price with slippage
-        limit_px = round(mid * (1 + slippage) if is_buy else mid * (1 - slippage), 2)
+        # Calculate limit price with slippage (using proper tick size)
+        limit_px = self.client.round_price(symbol, mid * (1 + slippage) if is_buy else mid * (1 - slippage))
         
         # Use market_open with explicit px
         result = self.exchange.market_open(symbol, is_buy, rounded_size, px=limit_px)
@@ -284,7 +288,7 @@ class HLOrderManager:
             name=symbol,
             is_buy=is_buy,
             sz=rounded_size,
-            limit_px=round(limit_px, 2),
+            limit_px=self.client.round_price(symbol, limit_px),
             order_type={"limit": {"tif": "Ioc"}},
             reduce_only=False,
             cloid=self._gen_cloid(),
@@ -306,20 +310,21 @@ class HLOrderManager:
         # Take Profit order
         if tp_price:
             try:
+                rounded_tp = self.client.round_price(symbol, tp_price)
                 tp_result = self.exchange.order(
                     name=symbol,
                     is_buy=not is_long,  # Opposite side to close
                     sz=rounded_size,
-                    limit_px=round(tp_price, 2),
+                    limit_px=rounded_tp,
                     order_type={"trigger": {
-                        "triggerPx": round(tp_price, 2),
+                        "triggerPx": rounded_tp,
                         "isMarket": True,
                         "tpsl": "tp"
                     }},
                     reduce_only=True,
                     cloid=self._gen_cloid(),
                 )
-                logger.info(f"✅ TP set @ ${tp_price:.2f}: {tp_result}")
+                logger.info(f"✅ TP set @ ${rounded_tp}: {tp_result}")
                 results.append({'type': 'tp', 'result': tp_result})
             except Exception as e:
                 logger.error(f"❌ Failed to set TP: {e}")
@@ -328,20 +333,21 @@ class HLOrderManager:
         # Stop Loss order
         if sl_price:
             try:
+                rounded_sl = self.client.round_price(symbol, sl_price)
                 sl_result = self.exchange.order(
                     name=symbol,
                     is_buy=not is_long,  # Opposite side to close
                     sz=rounded_size,
-                    limit_px=round(sl_price, 2),
+                    limit_px=rounded_sl,
                     order_type={"trigger": {
-                        "triggerPx": round(sl_price, 2),
+                        "triggerPx": rounded_sl,
                         "isMarket": True,
                         "tpsl": "sl"
                     }},
                     reduce_only=True,
                     cloid=self._gen_cloid(),
                 )
-                logger.info(f"✅ SL set @ ${sl_price:.2f}: {sl_result}")
+                logger.info(f"✅ SL set @ ${rounded_sl}: {sl_result}")
                 results.append({'type': 'sl', 'result': sl_result})
             except Exception as e:
                 logger.error(f"❌ Failed to set SL: {e}")
@@ -372,7 +378,7 @@ class HLOrderManager:
         mid = float(self.info.all_mids().get(symbol, 0))
         # For long position, we sell (so price below mid is ok)
         # For short position, we buy (so price above mid is ok)
-        limit_px = round(mid * (0.99 if is_long else 1.01), 2)
+        limit_px = self.client.round_price(symbol, mid * (0.99 if is_long else 1.01))
         
         # Use order() directly with reduce_only
         sz_decimals = self.client.get_sz_decimals(symbol)
@@ -414,19 +420,20 @@ class HLOrderManager:
         # Set Take Profit using SDK order()
         if tp_price:
             try:
+                rounded_tp = self.client.round_price(symbol, tp_price)
                 tp_result = self.exchange.order(
                     name=symbol,
                     is_buy=not is_long,  # Opposite side to close
                     sz=rounded_size,
-                    limit_px=round(tp_price, 6),
+                    limit_px=rounded_tp,
                     order_type={"trigger": {
-                        "triggerPx": round(tp_price, 6),
+                        "triggerPx": rounded_tp,
                         "isMarket": True,
                         "tpsl": "tp"
                     }},
                     reduce_only=True,
                 )
-                logger.info(f"✅ TP order placed for {symbol} @ ${tp_price}: {tp_result}")
+                logger.info(f"✅ TP order placed for {symbol} @ ${rounded_tp}: {tp_result}")
                 results.append({'type': 'tp', 'result': tp_result})
             except Exception as e:
                 logger.error(f"❌ TP order failed for {symbol}: {e}")
@@ -435,19 +442,20 @@ class HLOrderManager:
         # Set Stop Loss using SDK order()
         if sl_price:
             try:
+                rounded_sl = self.client.round_price(symbol, sl_price)
                 sl_result = self.exchange.order(
                     name=symbol,
                     is_buy=not is_long,  # Opposite side to close
                     sz=rounded_size,
-                    limit_px=round(sl_price, 6),
+                    limit_px=rounded_sl,
                     order_type={"trigger": {
-                        "triggerPx": round(sl_price, 6),
+                        "triggerPx": rounded_sl,
                         "isMarket": True,
                         "tpsl": "sl"
                     }},
                     reduce_only=True,
                 )
-                logger.info(f"✅ SL order placed for {symbol} @ ${sl_price}: {sl_result}")
+                logger.info(f"✅ SL order placed for {symbol} @ ${rounded_sl}: {sl_result}")
                 results.append({'type': 'sl', 'result': sl_result})
             except Exception as e:
                 logger.error(f"❌ SL order failed for {symbol}: {e}")
@@ -558,9 +566,9 @@ class HLOrderManager:
         if entry_price:
             # Use provided entry price with small buffer
             if is_buy:
-                limit_px = round(entry_price * 1.005, 2)  # 0.5% above for buys
+                limit_px = self.client.round_price(symbol, entry_price * 1.005)  # 0.5% above for buys
             else:
-                limit_px = round(entry_price * 0.995, 2)  # 0.5% below for sells
+                limit_px = self.client.round_price(symbol, entry_price * 0.995)  # 0.5% below for sells
             entry_result = self._market_order_with_price(symbol, is_buy, size, limit_px)
         else:
             entry_result = self.market_open(symbol, is_buy, size, slippage)
@@ -639,18 +647,19 @@ class HLOrderManager:
         """Place limit order using SDK order()."""
         sz_decimals = self.client.get_sz_decimals(symbol)
         rounded_size = round(size, sz_decimals)
+        rounded_price = self.client.round_price(symbol, price)
         cloid = self._gen_cloid()
         
         result = self.exchange.order(
             name=symbol,
             is_buy=is_buy,
             sz=rounded_size,
-            limit_px=round(price, 6),
+            limit_px=rounded_price,
             order_type={"limit": {"tif": tif}},
             reduce_only=reduce_only,
             cloid=cloid,
         )
-        logger.info(f"limit_order {symbol} {'BUY' if is_buy else 'SELL'} {rounded_size}@{price}: {result}")
+        logger.info(f"limit_order {symbol} {'BUY' if is_buy else 'SELL'} {rounded_size}@{rounded_price}: {result}")
         return result
     
     # ==================== ORDER MANAGEMENT ====================
@@ -774,14 +783,17 @@ class HLOrderManager:
             # Cancel all open orders for this symbol (including old SL)
             self.cancel_all(symbol)
             
+            # Round SL price to valid tick size
+            rounded_sl = self.client.round_price(symbol, new_sl)
+            
             # Place new trailing SL
             sl_result = self.exchange.order(
                 name=symbol,
                 is_buy=not is_long,
                 sz=size,
-                limit_px=round(new_sl, 6),
+                limit_px=rounded_sl,
                 order_type={"trigger": {
-                    "triggerPx": round(new_sl, 6),
+                    "triggerPx": rounded_sl,
                     "isMarket": True,
                     "tpsl": "sl"
                 }},
@@ -790,7 +802,7 @@ class HLOrderManager:
             )
             
             # Update tracked SL
-            self.position_orders[symbol]['sl_price'] = new_sl
+            self.position_orders[symbol]['sl_price'] = rounded_sl
             
             profit_pct = abs(current_price - entry_price) / entry_price * 100
             locked_pct = abs(new_sl - entry_price) / entry_price * 100
@@ -842,39 +854,41 @@ class HLOrderManager:
             
             # Set new TP if provided
             if new_tp is not None:
+                rounded_tp = self.client.round_price(symbol, new_tp)
                 tp_result = self.exchange.order(
                     name=symbol,
                     is_buy=not is_long,
                     sz=size,
-                    limit_px=round(new_tp, 6),
+                    limit_px=rounded_tp,
                     order_type={"trigger": {
-                        "triggerPx": round(new_tp, 6),
+                        "triggerPx": rounded_tp,
                         "isMarket": True,
                         "tpsl": "tp"
                     }},
                     reduce_only=True,
                     cloid=self._gen_cloid(),
                 )
-                self.position_orders[symbol]['tp_price'] = new_tp
-                modified.append(f"TP=${new_tp:.4f}")
+                self.position_orders[symbol]['tp_price'] = rounded_tp
+                modified.append(f"TP=${rounded_tp}")
             
             # Set new SL if provided
             if new_sl is not None:
+                rounded_sl = self.client.round_price(symbol, new_sl)
                 sl_result = self.exchange.order(
                     name=symbol,
                     is_buy=not is_long,
                     sz=size,
-                    limit_px=round(new_sl, 6),
+                    limit_px=rounded_sl,
                     order_type={"trigger": {
-                        "triggerPx": round(new_sl, 6),
+                        "triggerPx": rounded_sl,
                         "isMarket": True,
                         "tpsl": "sl"
                     }},
                     reduce_only=True,
                     cloid=self._gen_cloid(),
                 )
-                self.position_orders[symbol]['sl_price'] = new_sl
-                modified.append(f"SL=${new_sl:.4f}")
+                self.position_orders[symbol]['sl_price'] = rounded_sl
+                modified.append(f"SL=${rounded_sl}")
             
             logger.info(f"✅ Modified stops for {symbol}: {', '.join(modified)}")
             return {'success': True, 'modified': modified}

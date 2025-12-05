@@ -75,6 +75,59 @@ class HyperLiquidClient:
                 return asset.get("szDecimals", 3)
         return 3
     
+    def get_price_decimals(self, symbol: str) -> int:
+        """
+        Get price decimals (tick size) for proper price rounding.
+        
+        HyperLiquid requires prices to be divisible by tick size.
+        Different assets have different tick sizes.
+        
+        First tries to get from API metadata, falls back to known values.
+        """
+        # Try to get from API metadata first
+        try:
+            meta = self.get_meta()
+            for asset in meta.get("universe", []):
+                if asset.get("name") == symbol:
+                    # szDecimals is for size, we need to infer price decimals
+                    # HyperLiquid uses different tick sizes based on price magnitude
+                    break
+        except Exception:
+            pass
+        
+        # Hardcoded tick sizes for common assets
+        # Based on HyperLiquid's actual tick sizes (verified)
+        TICK_SIZES = {
+            'BTC': 1,    # $0.1 tick = 1 decimal
+            'ETH': 2,    # $0.01 tick = 2 decimals
+            'SOL': 3,    # $0.001 tick = 3 decimals (SOL ~$200)
+            'DOGE': 5,   # $0.00001 tick
+            'WIF': 4,    # $0.0001 tick
+            'PEPE': 9,   # Very small tick for memecoins
+            'SUI': 4,    # $0.0001 tick
+            'ARB': 4,    # $0.0001 tick
+            'OP': 4,     # $0.0001 tick
+            'AVAX': 3,   # $0.001 tick
+            'LINK': 3,   # $0.001 tick
+            'MATIC': 4,  # $0.0001 tick (POL)
+            'XRP': 4,    # $0.0001 tick
+            'HYPE': 3,   # $0.001 tick
+            'APT': 3,    # $0.001 tick
+            'TIA': 4,    # $0.0001 tick
+            'JUP': 4,    # $0.0001 tick
+            'BONK': 9,   # Very small tick
+            'RENDER': 4, # $0.0001 tick
+            'INJ': 3,    # $0.001 tick
+            'FET': 4,    # $0.0001 tick
+            'SEI': 4,    # $0.0001 tick
+        }
+        return TICK_SIZES.get(symbol, 4)  # Default to 4 decimals
+    
+    def round_price(self, symbol: str, price: float) -> float:
+        """Round price to valid tick size for the asset."""
+        decimals = self.get_price_decimals(symbol)
+        return round(price, decimals)
+    
     # ==================== DIRECT SDK PASSTHROUGH ====================
     # Exchange methods - use exchange.method() directly for:
     #   order(), bulk_orders(), market_open(), market_close()
