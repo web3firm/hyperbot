@@ -138,7 +138,7 @@ class ProTradingFilters:
                 if abs(btc_change_pct) > 2.0:
                     return FilterResult(False, corr_reason, 0.0)
         
-        # 4. Time Filter
+        # 4. Time Filter - Avoid first 15 min of major session opens
         total_checks += 1
         time_passed, time_reason = self.check_time_filter(datetime.now(timezone.utc))
         if time_passed:
