@@ -307,10 +307,13 @@ class HLOrderManager:
         rounded_size = round(size, sz_decimals)
         results = []
         
+        logger.info(f"📍 set_tp_sl_sdk: {symbol} size={rounded_size} is_long={is_long} TP=${tp_price} SL=${sl_price}")
+        
         # Take Profit order
         if tp_price:
             try:
                 rounded_tp = self.client.round_price(symbol, tp_price)
+                logger.info(f"   Placing TP order: {symbol} {'SELL' if is_long else 'BUY'} {rounded_size} @ trigger ${rounded_tp}")
                 tp_result = self.exchange.order(
                     name=symbol,
                     is_buy=not is_long,  # Opposite side to close
@@ -324,16 +327,25 @@ class HLOrderManager:
                     reduce_only=True,
                     cloid=self._gen_cloid(),
                 )
-                logger.info(f"✅ TP set @ ${rounded_tp}: {tp_result}")
-                results.append({'type': 'tp', 'result': tp_result})
+                # Check for error in response
+                statuses = tp_result.get('response', {}).get('data', {}).get('statuses', [])
+                if statuses and 'error' in statuses[0]:
+                    logger.error(f"❌ TP order error: {statuses[0]['error']}")
+                    results.append({'type': 'tp', 'error': statuses[0]['error']})
+                else:
+                    logger.info(f"✅ TP set @ ${rounded_tp}: {tp_result}")
+                    results.append({'type': 'tp', 'result': tp_result})
             except Exception as e:
-                logger.error(f"❌ Failed to set TP: {e}")
+                logger.error(f"❌ Failed to set TP: {e}", exc_info=True)
                 results.append({'type': 'tp', 'error': str(e)})
+        else:
+            logger.warning(f"⚠️ No TP price provided for {symbol}")
         
         # Stop Loss order
         if sl_price:
             try:
                 rounded_sl = self.client.round_price(symbol, sl_price)
+                logger.info(f"   Placing SL order: {symbol} {'SELL' if is_long else 'BUY'} {rounded_size} @ trigger ${rounded_sl}")
                 sl_result = self.exchange.order(
                     name=symbol,
                     is_buy=not is_long,  # Opposite side to close
@@ -347,11 +359,19 @@ class HLOrderManager:
                     reduce_only=True,
                     cloid=self._gen_cloid(),
                 )
-                logger.info(f"✅ SL set @ ${rounded_sl}: {sl_result}")
-                results.append({'type': 'sl', 'result': sl_result})
+                # Check for error in response
+                statuses = sl_result.get('response', {}).get('data', {}).get('statuses', [])
+                if statuses and 'error' in statuses[0]:
+                    logger.error(f"❌ SL order error: {statuses[0]['error']}")
+                    results.append({'type': 'sl', 'error': statuses[0]['error']})
+                else:
+                    logger.info(f"✅ SL set @ ${rounded_sl}: {sl_result}")
+                    results.append({'type': 'sl', 'result': sl_result})
             except Exception as e:
-                logger.error(f"❌ Failed to set SL: {e}")
+                logger.error(f"❌ Failed to set SL: {e}", exc_info=True)
                 results.append({'type': 'sl', 'error': str(e)})
+        else:
+            logger.warning(f"⚠️ No SL price provided for {symbol}")
         
         return results
     
@@ -627,10 +647,29 @@ class HLOrderManager:
         tp_float = float(tp_price) if tp_price else None
         entry_float = float(entry_price) if entry_price else None
         
+        logger.info(f"🎯 place_market_order_with_stops: {symbol} {side} size={size_float}")
+        logger.info(f"   TP=${tp_float} SL=${sl_float} Entry=${entry_float}")
+        
+        if not tp_float:
+            logger.warning(f"⚠️ WARNING: No TP price provided!")
+        if not sl_float:
+            logger.warning(f"⚠️ WARNING: No SL price provided!")
+        
         result = await self._loop.run_in_executor(
             None, 
             lambda: self.market_open_with_stops(symbol, is_buy, size_float, tp_float, sl_float, entry_price=entry_float)
         )
+        
+        # Log TPSL results
+        tpsl = result.get('tpsl', [])
+        if tpsl:
+            for r in tpsl:
+                if 'error' in r:
+                    logger.error(f"❌ {r['type'].upper()} failed: {r['error']}")
+                else:
+                    logger.info(f"✅ {r['type'].upper()} placed successfully")
+        else:
+            logger.warning(f"⚠️ No TPSL results returned!")
         
         # Convert to bot.py expected format
         success = result.get('status') == 'ok'

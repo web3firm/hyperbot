@@ -434,6 +434,22 @@ class HyperAIBot:
             }
             self.drawdown_monitor = DrawdownMonitor(account_manager_proxy, drawdown_config)
             
+            # Initialize Kelly Criterion position sizing
+            kelly_enabled = os.getenv('KELLY_ENABLED', 'true').lower() == 'true'
+            if kelly_enabled:
+                kelly_fraction = float(os.getenv('KELLY_FRACTION', '0.5'))  # Half Kelly default
+                kelly_min_trades = int(os.getenv('KELLY_MIN_TRADES', '20'))
+                kelly_max_pct = float(os.getenv('KELLY_MAX_POSITION_PCT', '25'))
+                self.kelly = KellyCriterion(
+                    kelly_fraction=kelly_fraction,
+                    min_trades=kelly_min_trades,
+                    max_position_pct=kelly_max_pct
+                )
+                logger.info(f"📊 Kelly Criterion enabled: {kelly_fraction:.0%} Kelly, min {kelly_min_trades} trades")
+            else:
+                self.kelly = None
+                logger.info("📊 Kelly Criterion disabled (using fixed position sizing)")
+            
             # Initialize Telegram bot (if credentials provided)
             if os.getenv('TELEGRAM_BOT_TOKEN') and os.getenv('TELEGRAM_CHAT_ID'):
                 try:
@@ -684,11 +700,42 @@ class HyperAIBot:
             positions = account_state.get('positions', [])
             current_symbols = {pos['symbol'] for pos in positions if float(pos.get('size', 0)) != 0}
             
+            # Build position details for tracking
+            if not hasattr(self, '_position_details'):
+                self._position_details = {}
+            
+            # Update position details for active positions
+            for pos in positions:
+                size = float(pos.get('size', 0))
+                if size != 0:
+                    symbol = pos['symbol']
+                    self._position_details[symbol] = {
+                        'entry_price': float(pos.get('entry_price', 0)),
+                        'size': abs(size),
+                        'side': 'long' if size > 0 else 'short',
+                        'unrealized_pnl': float(pos.get('unrealized_pnl', 0))
+                    }
+            
             # Track symbols that closed since last check
             if hasattr(self, '_last_positions'):
                 closed_positions = self._last_positions - current_symbols
                 for symbol in closed_positions:
                     logger.info(f"🔄 Position closed: {symbol}")
+                    
+                    # Record trade to Kelly Criterion if we have details
+                    if self.kelly and symbol in self._position_details:
+                        details = self._position_details[symbol]
+                        realized_pnl = details.get('unrealized_pnl', 0)  # Now realized
+                        self.kelly.add_trade(
+                            pnl=realized_pnl,
+                            entry_price=details['entry_price'],
+                            exit_price=details['entry_price'],  # Approximate
+                            size=details['size'],
+                            side=details['side']
+                        )
+                        logger.info(f"📊 Kelly: Recorded trade {symbol} P&L: ${realized_pnl:+.2f}")
+                        del self._position_details[symbol]
+                    
                     # Clean up backup targets
                     if hasattr(self.order_manager, 'position_targets') and symbol in self.order_manager.position_targets:
                         del self.order_manager.position_targets[symbol]
@@ -1124,6 +1171,23 @@ class HyperAIBot:
                         signal = await self.strategy.generate_signal(market_data, account_state)
                     
                     if signal:
+                        # Apply Kelly Criterion position sizing adjustment
+                        if self.kelly:
+                            kelly_result = self.kelly.calculate()
+                            if kelly_result.confidence > 0.3:  # Only adjust if we have confidence
+                                # Adjust position size based on Kelly
+                                original_size = signal['size']
+                                kelly_adjusted_pct = min(
+                                    kelly_result.position_size_pct,
+                                    float(os.getenv('MAX_POSITION_SIZE_PCT', '55'))
+                                )
+                                # Scale the token size proportionally
+                                if signal.get('position_size_pct', 50) > 0:
+                                    size_ratio = kelly_adjusted_pct / signal.get('position_size_pct', 50)
+                                    signal['size'] = float(Decimal(str(original_size)) * Decimal(str(size_ratio)))
+                                    signal['position_size_pct'] = kelly_adjusted_pct
+                                    logger.info(f"📊 Kelly adjusted size: {original_size:.4f} → {signal['size']:.4f} ({kelly_adjusted_pct:.1f}%)")
+                        
                         # Send Telegram notification for new signal
                         if self.telegram_bot:
                             try:
