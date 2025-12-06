@@ -804,6 +804,24 @@ class HLOrderManager:
         logger.info(f"🎯 Setting TP/SL for {symbol} {'LONG' if is_long else 'SHORT'} {position_size}")
         logger.info(f"   Entry: ${entry_price} | TP: ${tp_price} | SL: ${sl_price}")
         
+        # CRITICAL FIX: Cancel existing TP/SL orders before placing new ones
+        # This prevents duplicate orders from accumulating on the exchange
+        try:
+            if tp_price is not None and sl_price is not None:
+                # Setting both - cancel all existing orders for this symbol
+                self.cancel_all(symbol)
+                logger.info(f"   Cancelled all existing orders for {symbol}")
+            elif sl_price is not None:
+                # Only setting SL - cancel existing SL orders, keep TP
+                self.cancel_sl_only(symbol, is_long)
+                logger.info(f"   Cancelled existing SL orders for {symbol}")
+            elif tp_price is not None:
+                # Only setting TP - cancel existing TP orders, keep SL
+                self._cancel_tp_only(symbol, is_long)
+                logger.info(f"   Cancelled existing TP orders for {symbol}")
+        except Exception as e:
+            logger.warning(f"   Failed to cancel existing orders: {e}")
+        
         # Set TP/SL with proper grouping
         try:
             results = self.set_tp_sl(symbol, position_size, is_long, tp_price, sl_price)
