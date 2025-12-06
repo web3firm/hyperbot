@@ -225,6 +225,120 @@ class DatabaseManager:
                 signal_id, reason
             )
     
+    async def update_trade_exit(
+        self,
+        symbol: str,
+        exit_price: float,
+        pnl: float,
+        pnl_percent: float,
+        exit_reason: str = 'CLOSED',
+    ) -> bool:
+        """
+        Update the most recent open trade for a symbol with exit data.
+        
+        Called when a position is closed (TP hit, SL hit, manual close).
+        
+        Args:
+            symbol: Trading symbol
+            exit_price: Exit price
+            pnl: Profit/loss in USD
+            pnl_percent: Profit/loss percentage
+            exit_reason: 'TP', 'SL', 'MANUAL', 'LIQUIDATION', etc.
+            
+        Returns:
+            True if trade was updated, False if no open trade found
+        """
+        async with self.pool.acquire() as conn:
+            # Find most recent open trade for this symbol
+            trade = await conn.fetchrow(
+                """
+                SELECT id, timestamp FROM trades 
+                WHERE symbol = $1 AND status = 'OPEN'
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """,
+                symbol
+            )
+            
+            if not trade:
+                logger.warning(f"⚠️ No open trade found for {symbol} to close")
+                return False
+            
+            trade_id = trade['id']
+            entry_time = trade['timestamp']
+            
+            # Calculate duration
+            duration = (datetime.now(timezone.utc) - entry_time).total_seconds() if entry_time else None
+            
+            # Update trade
+            await conn.execute(
+                """
+                UPDATE trades SET
+                    exit_price = $2,
+                    pnl = $3,
+                    pnl_percent = $4,
+                    status = 'CLOSED',
+                    closed_at = NOW(),
+                    duration_seconds = $5,
+                    notes = $6
+                WHERE id = $1
+                """,
+                trade_id, exit_price, pnl, pnl_percent, int(duration) if duration else None, exit_reason
+            )
+            
+            logger.info(f"✅ Trade #{trade_id} closed: {symbol} @ ${exit_price} | PnL: ${pnl:+.2f} ({pnl_percent:+.2f}%) | Reason: {exit_reason}")
+            return True
+    
+    async def get_trade_stats(self, days: int = 30) -> Dict[str, Any]:
+        """
+        Get trading statistics for Kelly Criterion and ML training.
+        
+        Returns:
+            Dict with win_rate, avg_win, avg_loss, total_trades, etc.
+        """
+        async with self.pool.acquire() as conn:
+            stats = await conn.fetchrow(
+                """
+                SELECT 
+                    COUNT(*) as total_trades,
+                    COUNT(CASE WHEN pnl > 0 THEN 1 END) as wins,
+                    COUNT(CASE WHEN pnl < 0 THEN 1 END) as losses,
+                    AVG(CASE WHEN pnl > 0 THEN pnl END) as avg_win,
+                    AVG(CASE WHEN pnl < 0 THEN ABS(pnl) END) as avg_loss,
+                    SUM(pnl) as total_pnl,
+                    AVG(pnl) as avg_pnl,
+                    STDDEV(pnl) as pnl_stddev
+                FROM trades
+                WHERE status = 'CLOSED'
+                    AND closed_at >= NOW() - INTERVAL '%s days'
+                    AND pnl IS NOT NULL
+                """ % days
+            )
+            
+            if not stats or stats['total_trades'] == 0:
+                return {
+                    'win_rate': 0.5,
+                    'avg_win': 0,
+                    'avg_loss': 0,
+                    'total_trades': 0,
+                    'total_pnl': 0,
+                }
+            
+            total = stats['total_trades']
+            wins = stats['wins'] or 0
+            
+            return {
+                'win_rate': wins / total if total > 0 else 0.5,
+                'wins': wins,
+                'losses': stats['losses'] or 0,
+                'avg_win': float(stats['avg_win'] or 0),
+                'avg_loss': float(stats['avg_loss'] or 0),
+                'total_trades': total,
+                'total_pnl': float(stats['total_pnl'] or 0),
+                'avg_pnl': float(stats['avg_pnl'] or 0),
+                'pnl_stddev': float(stats['pnl_stddev'] or 0),
+            }
+    
     # ==================== ML PREDICTIONS ====================
     
     async def insert_ml_prediction(

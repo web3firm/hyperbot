@@ -6,7 +6,7 @@ Bypasses SDK limitation that hardcodes grouping to "na".
 import asyncio
 import uuid
 import time
-from typing import Optional, Dict, Any, Callable, List, Literal
+from typing import Optional, Dict, Any, Callable, List, Literal, Tuple
 from hyperliquid.utils.types import Cloid
 from hyperliquid.utils.signing import (
     sign_l1_action, 
@@ -304,6 +304,145 @@ class HLOrderManager:
         logger.info(f"_market_order_with_price {symbol} {'BUY' if is_buy else 'SELL'} {rounded_size} @ ${limit_px}: {result}")
         return result
     
+    def limit_order_alo(
+        self,
+        symbol: str,
+        is_buy: bool,
+        size: float,
+        limit_price: float,
+    ) -> Dict:
+        """
+        Place limit order with ALO (Add Liquidity Only).
+        
+        FEES ADVANTAGE: ALO orders = 0.01% vs Market orders = 0.035%
+        Saves ~70% on fees!
+        
+        Args:
+            symbol: Trading symbol
+            is_buy: True for buy, False for sell
+            size: Order size
+            limit_price: Limit price
+            
+        Returns:
+            Order result
+        """
+        sz_decimals = self.client.get_sz_decimals(symbol)
+        rounded_size = round(size, sz_decimals)
+        rounded_price = self.client.round_price(symbol, limit_price)
+        
+        result = self.exchange.order(
+            name=symbol,
+            is_buy=is_buy,
+            sz=rounded_size,
+            limit_px=rounded_price,
+            order_type={"limit": {"tif": "Alo"}},  # Add Liquidity Only
+            reduce_only=False,
+            cloid=self._gen_cloid(),
+        )
+        
+        logger.info(f"📝 ALO limit order: {symbol} {'BUY' if is_buy else 'SELL'} {rounded_size} @ ${rounded_price}")
+        return result
+    
+    async def limit_order_with_chase(
+        self,
+        symbol: str,
+        is_buy: bool,
+        size: float,
+        initial_price: float,
+        max_chase_pct: float = 0.2,
+        chase_interval: float = 1.0,
+        max_attempts: int = 5,
+    ) -> Dict:
+        """
+        Place limit order with chase mechanism if not filled.
+        
+        Strategy:
+        1. Place ALO limit order at initial price
+        2. Wait for fill
+        3. If not filled after interval, adjust price slightly and retry
+        4. After max attempts, fall back to IOC market order
+        
+        Args:
+            symbol: Trading symbol
+            is_buy: True for buy
+            size: Order size
+            initial_price: Starting limit price
+            max_chase_pct: Max percentage to chase (default 0.2%)
+            chase_interval: Seconds between chase attempts
+            max_attempts: Maximum chase attempts before falling back to market
+            
+        Returns:
+            Order result with fill info
+        """
+        import asyncio
+        
+        remaining_size = size
+        filled_size = 0.0
+        avg_price = 0.0
+        chase_step = max_chase_pct / max_attempts
+        
+        for attempt in range(max_attempts):
+            # Calculate chase price
+            if is_buy:
+                chase_price = initial_price * (1 + (chase_step * attempt / 100))
+            else:
+                chase_price = initial_price * (1 - (chase_step * attempt / 100))
+            
+            # Place ALO order
+            result = self.limit_order_alo(symbol, is_buy, remaining_size, chase_price)
+            
+            # Check for fill
+            statuses = result.get('response', {}).get('data', {}).get('statuses', [])
+            if statuses:
+                status = statuses[0]
+                if 'filled' in status:
+                    fill = status['filled']
+                    fill_size = float(fill.get('totalSz', 0))
+                    fill_price = float(fill.get('avgPx', chase_price))
+                    
+                    filled_size += fill_size
+                    avg_price = fill_price  # Simplified
+                    remaining_size -= fill_size
+                    
+                    logger.info(f"   Chase attempt {attempt+1}: Filled {fill_size} @ ${fill_price}")
+                    
+                    if remaining_size <= 0:
+                        break
+                elif 'resting' in status:
+                    # Order is resting, wait and check
+                    await asyncio.sleep(chase_interval)
+                    
+                    # Cancel resting order
+                    oid = status['resting'].get('oid')
+                    if oid:
+                        try:
+                            self.exchange.cancel(symbol, oid)
+                        except Exception:
+                            pass
+                elif 'error' in status:
+                    logger.warning(f"   Chase attempt {attempt+1} error: {status['error']}")
+            
+            await asyncio.sleep(0.1)  # Small delay between attempts
+        
+        # If still remaining, use market order
+        if remaining_size > 0:
+            logger.info(f"   Chase exhausted, using market for remaining {remaining_size}")
+            market_result = self.market_open(symbol, is_buy, remaining_size)
+            
+            # Update fill info
+            statuses = market_result.get('response', {}).get('data', {}).get('statuses', [])
+            if statuses and 'filled' in statuses[0]:
+                fill = statuses[0]['filled']
+                filled_size += float(fill.get('totalSz', 0))
+        
+        return {
+            'status': 'ok' if filled_size > 0 else 'error',
+            'filled_size': filled_size,
+            'avg_price': avg_price,
+            'chase_attempts': attempt + 1,
+            'used_market_fallback': remaining_size > 0,
+        }
+    
     def set_tp_sl_sdk(self, symbol: str, size: float, is_long: bool,
                       tp_price: Optional[float] = None,
                       sl_price: Optional[float] = None) -> List[Dict]:
@@ -490,6 +629,131 @@ class HLOrderManager:
                 results.append({'type': 'sl', 'error': str(e)})
         
         return results
+    
+    def set_scaled_tp(
+        self,
+        symbol: str,
+        size: float,
+        is_long: bool,
+        entry_price: float,
+        tp_levels: Optional[List[Tuple[float, float]]] = None,
+    ) -> List[Dict]:
+        """
+        Set multiple TP orders at different price levels (scaled exits).
+        
+        PRO TRADER RULE: Lock in profits, let winners run.
+        
+        Default levels (if not specified):
+        - 33% at 2% profit
+        - 33% at 4% profit
+        - 34% at 6% profit
+        
+        Args:
+            symbol: Trading symbol
+            size: Total position size
+            is_long: True for long positions
+            entry_price: Entry price for calculating TP levels
+            tp_levels: Optional list of (percentage_of_size, price) tuples
+                       e.g., [(0.33, 105.0), (0.33, 107.0), (0.34, 110.0)]
+        
+        Returns:
+            List of order results
+        """
+        sz_decimals = self.client.get_sz_decimals(symbol)
+        results = []
+        
+        # Default TP levels if not specified
+        if tp_levels is None:
+            if is_long:
+                tp_levels = [
+                    (0.33, entry_price * 1.02),  # 33% at 2% profit
+                    (0.33, entry_price * 1.04),  # 33% at 4% profit
+                    (0.34, entry_price * 1.06),  # 34% at 6% profit
+                ]
+            else:
+                tp_levels = [
+                    (0.33, entry_price * 0.98),  # 33% at 2% profit
+                    (0.33, entry_price * 0.96),  # 33% at 4% profit
+                    (0.34, entry_price * 0.94),  # 34% at 6% profit
+                ]
+        
+        logger.info(f"📊 Setting scaled TP for {symbol}: {len(tp_levels)} levels")
+        
+        for idx, (pct, price) in enumerate(tp_levels):
+            partial_size = round(size * pct, sz_decimals)
+            if partial_size <= 0:
+                continue
+            
+            try:
+                rounded_price = self.client.round_price(symbol, price)
+                
+                result = self.exchange.order(
+                    name=symbol,
+                    is_buy=not is_long,  # Opposite side to close
+                    sz=partial_size,
+                    limit_px=rounded_price,
+                    order_type={"trigger": {
+                        "triggerPx": rounded_price,
+                        "isMarket": True,
+                        "tpsl": "tp"
+                    }},
+                    reduce_only=True,
+                    cloid=self._gen_cloid(),
+                )
+                
+                profit_pct = abs((price - entry_price) / entry_price * 100)
+                logger.info(f"   TP{idx+1}: {pct*100:.0f}% ({partial_size}) @ ${rounded_price} ({profit_pct:.1f}% profit)")
+                results.append({
+                    'type': f'tp_{idx+1}',
+                    'size': partial_size,
+                    'price': rounded_price,
+                    'profit_pct': profit_pct,
+                    'result': result,
+                })
+                
+            except Exception as e:
+                logger.error(f"❌ Scaled TP {idx+1} failed: {e}")
+                results.append({'type': f'tp_{idx+1}', 'error': str(e)})
+        
+        return results
+    
+    def set_atr_scaled_tp(
+        self,
+        symbol: str,
+        size: float,
+        is_long: bool,
+        entry_price: float,
+        atr: float,
+    ) -> List[Dict]:
+        """
+        Set scaled TP levels based on ATR multiples.
+        
+        Levels:
+        - 33% at 1.5x ATR
+        - 33% at 3x ATR
+        - 34% at 5x ATR
+        
+        Args:
+            symbol: Trading symbol
+            size: Total position size
+            is_long: True for long positions
+            entry_price: Entry price
+            atr: Current ATR value
+        """
+        if is_long:
+            tp_levels = [
+                (0.33, entry_price + (atr * 1.5)),
+                (0.33, entry_price + (atr * 3.0)),
+                (0.34, entry_price + (atr * 5.0)),
+            ]
+        else:
+            tp_levels = [
+                (0.33, entry_price - (atr * 1.5)),
+                (0.33, entry_price - (atr * 3.0)),
+                (0.34, entry_price - (atr * 5.0)),
+            ]
+        
+        return self.set_scaled_tp(symbol, size, is_long, entry_price, tp_levels)
     
     def set_position_tpsl(self, symbol: str, 
                           tp_price: Optional[float] = None,

@@ -5,13 +5,17 @@ Institutional-grade strategy with adaptive risk and smart money concepts.
 Features:
 - ATR-based dynamic TP/SL (not fixed percentages)
 - Market regime detection (trending/ranging/volatile)
-- Smart Money Concepts (FVG, Order Blocks, Liquidity Sweeps)
+- Smart Money Concepts (FVG, Order Blocks, Liquidity Sweeps, BoS)
 - Multi-timeframe alignment
 - Session-aware trading
 - Order flow integration
+- VWAP confluence (institutional fair value)
+- Divergence detection (RSI/MACD)
+- Funding rate filter (avoid squeezes)
+- Volume confirmation (filter fake moves)
 - Adaptive position sizing
 
-Target: 70%+ win rate with 3:1+ R:R in favorable conditions.
+Target: 65%+ win rate with 3:1+ R:R in favorable conditions.
 """
 
 import os
@@ -28,6 +32,9 @@ from app.strategies.adaptive.order_flow import OrderFlowAnalyzer
 from app.strategies.adaptive.session_manager import SessionManager
 from app.strategies.adaptive.adaptive_risk import AdaptiveRiskManager
 from app.strategies.adaptive.pro_filters import ProTradingFilters
+from app.strategies.adaptive.vwap import VWAPCalculator
+from app.strategies.adaptive.divergence import DivergenceDetector
+from app.strategies.adaptive.funding_rate import FundingRateFilter
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +94,9 @@ class SwingStrategy:
         self.rsi_oversold_base = 30
         self.rsi_overbought_base = 70
         
+        # Volume confirmation threshold
+        self.volume_multiplier = Decimal(os.getenv('VOLUME_CONFIRMATION_MULT', '1.2'))  # Require 20% above average
+        
         # Initialize adaptive components
         self.regime_detector = MarketRegimeDetector()
         self.smc_analyzer = SmartMoneyAnalyzer()
@@ -96,9 +106,14 @@ class SwingStrategy:
         self.risk_manager = AdaptiveRiskManager()
         self.pro_filters = ProTradingFilters(symbol)  # Professional trading filters
         
+        # NEW: Pro-level enhancements
+        self.vwap_calculator = VWAPCalculator()
+        self.divergence_detector = DivergenceDetector()
+        self.funding_filter = FundingRateFilter()
+        
         # State tracking - BE PATIENT, DON'T OVERTRADE
         self.last_signal_time: Optional[datetime] = None
-        self.signal_cooldown_seconds = int(os.getenv('SWING_COOLDOWN', '300'))  # 5 min between signals
+        self.signal_cooldown_seconds = int(os.getenv('SWING_COOLDOWN', '600'))  # 10 min between signals (was 5)
         self.recent_prices: deque = deque(maxlen=200)
         
         # Indicator cache
@@ -108,6 +123,10 @@ class SwingStrategy:
         # RSI smoothing state
         self.rsi_avg_gain: Optional[Decimal] = None
         self.rsi_avg_loss: Optional[Decimal] = None
+        
+        # RSI/MACD history for divergence detection
+        self.rsi_history: deque = deque(maxlen=30)
+        self.macd_history: deque = deque(maxlen=30)
         
         # Statistics
         self.signals_generated = 0
@@ -156,6 +175,14 @@ class SwingStrategy:
         indicators = self._calculate_indicators(candles)
         if not indicators:
             return None
+        
+        # Store indicator history for divergence detection
+        rsi = indicators.get('rsi')
+        macd = indicators.get('macd', {})
+        if rsi:
+            self.rsi_history.append(rsi)
+        if macd:
+            self.macd_history.append(macd)
         
         # 2. Detect market regime
         regime, regime_confidence, regime_params = self.regime_detector.detect_regime(
@@ -211,22 +238,28 @@ class SwingStrategy:
             current_price=current_price,
         )
         
+        # Apply enhanced scoring (VWAP, Divergence, Volume)
+        long_enhanced, long_details = self._calculate_enhanced_score('long', candles, indicators, long_score)
+        short_enhanced, short_details = self._calculate_enhanced_score('short', candles, indicators, short_score)
+        
         # Log both scores for visibility
-        logger.debug(f"📊 Scores: LONG={long_score}/10 | SHORT={short_score}/10 | Regime={regime.value}")
+        logger.debug(f"📊 Scores: LONG={long_enhanced}/12 | SHORT={short_enhanced}/12 | Regime={regime.value}")
         
         # Determine best direction
-        if long_score >= self.min_signal_score and long_score > short_score:
+        if long_enhanced >= self.min_signal_score and long_enhanced > short_enhanced:
             direction = 'long'
-            score = long_score
-            logger.info(f"✅ LONG wins: {long_score} vs SHORT {short_score}")
-        elif short_score >= self.min_signal_score and short_score > long_score:
+            score = long_enhanced
+            score_details = long_details
+            logger.info(f"✅ LONG wins: {long_enhanced} vs SHORT {short_enhanced}")
+        elif short_enhanced >= self.min_signal_score and short_enhanced > long_enhanced:
             direction = 'short'
-            score = short_score
-            logger.info(f"✅ SHORT wins: {short_score} vs LONG {long_score}")
+            score = short_enhanced
+            score_details = short_details
+            logger.info(f"✅ SHORT wins: {short_enhanced} vs LONG {long_enhanced}")
         else:
             # No valid signal - log why
-            if long_score > 0 or short_score > 0:
-                logger.debug(f"⏳ No signal: LONG={long_score}/6, SHORT={short_score}/6 (need 6+)")
+            if long_enhanced > 0 or short_enhanced > 0:
+                logger.debug(f"⏳ No signal: LONG={long_enhanced}/7, SHORT={short_enhanced}/7 (need 7+)")
             return None
         
         # Check HTF alignment
@@ -463,7 +496,105 @@ class SwingStrategy:
            (direction == 'short' and whale_bias == 'bearish'):
             score += 0.5
         
+        # ========== NEW: BREAK OF STRUCTURE (0-1.5 points) ==========
+        bos_score, bos_reason = self.smc_analyzer.get_bos_signal(direction)
+        if bos_score > 0:
+            score += bos_score
+            logger.debug(f"   BoS: +{bos_score:.1f} ({bos_reason})")
+        elif bos_score < 0:
+            score += bos_score  # Penalty
+            logger.debug(f"   BoS: {bos_score:.1f} ({bos_reason})")
+        
         return int(score)
+    
+    def _calculate_enhanced_score(
+        self,
+        direction: str,
+        candles: List[Dict],
+        indicators: Dict,
+        base_score: int,
+    ) -> Tuple[int, Dict[str, Any]]:
+        """
+        Calculate enhanced score with new pro-level features.
+        
+        Additional Scoring:
+        - VWAP confluence: 0-1.5 points
+        - Divergence: 0-2 points
+        - Volume confirmation: 0-1 point
+        
+        Args:
+            direction: 'long' or 'short'
+            candles: OHLCV candles
+            indicators: Calculated indicators
+            base_score: Score from _calculate_signal_score
+            
+        Returns:
+            Tuple of (enhanced_score, details)
+        """
+        score = base_score
+        details = {'base_score': base_score}
+        
+        # ========== VWAP CONFLUENCE (0-1.5 points) ==========
+        vwap_analysis = self.vwap_calculator.calculate_from_candles(candles)
+        vwap_score, vwap_reason = self.vwap_calculator.get_vwap_signal(direction, vwap_analysis)
+        if vwap_score != 0:
+            score += vwap_score
+            details['vwap'] = {'score': vwap_score, 'reason': vwap_reason}
+            logger.debug(f"   VWAP: +{vwap_score:.1f} ({vwap_reason})")
+        
+        # ========== DIVERGENCE (0-2 points) ==========
+        if len(self.rsi_history) >= 15 and len(self.macd_history) >= 15:
+            div_analysis = self.divergence_detector.detect_all(
+                candles, 
+                list(self.rsi_history), 
+                list(self.macd_history)
+            )
+            div_score, div_reason = self.divergence_detector.get_divergence_score(direction)
+            if div_score != 0:
+                score += div_score
+                details['divergence'] = {'score': div_score, 'reason': div_reason}
+                logger.debug(f"   Divergence: +{div_score:.1f} ({div_reason})")
+        
+        # ========== VOLUME CONFIRMATION (0-1 point) ==========
+        volume_ok, volume_ratio = self._check_volume_confirmation(candles)
+        if volume_ok:
+            score += 1
+            details['volume'] = {'confirmed': True, 'ratio': volume_ratio}
+            logger.debug(f"   Volume: +1 (ratio: {volume_ratio:.1f}x)")
+        else:
+            # Slight penalty for below-average volume
+            score -= 0.5
+            details['volume'] = {'confirmed': False, 'ratio': volume_ratio}
+            logger.debug(f"   Volume: -0.5 (weak: {volume_ratio:.1f}x)")
+        
+        return int(score), details
+    
+    def _check_volume_confirmation(self, candles: List[Dict]) -> Tuple[bool, float]:
+        """
+        Check if current volume is above average (confirms move is real).
+        
+        VOLUME IS TRUTH: No volume = fake move.
+        
+        Args:
+            candles: OHLCV candles
+            
+        Returns:
+            Tuple of (is_confirmed, volume_ratio)
+        """
+        if len(candles) < 20:
+            return True, 1.0  # Not enough data, pass
+        
+        volumes = [float(c.get('volume', c.get('v', 0))) for c in candles]
+        avg_volume = sum(volumes[-20:]) / 20
+        current_volume = volumes[-1]
+        
+        if avg_volume <= 0:
+            return True, 1.0
+        
+        volume_ratio = current_volume / avg_volume
+        is_confirmed = Decimal(str(volume_ratio)) >= self.volume_multiplier
+        
+        return is_confirmed, volume_ratio
     
     def _calculate_indicators(self, candles: List[Dict]) -> Optional[Dict]:
         """Calculate all technical indicators."""

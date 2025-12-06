@@ -30,6 +30,17 @@ class AdaptiveRiskManager:
     - Position Size = (Account * Risk%) / Stop Distance
     """
     
+    # Regime-Based R:R Optimization
+    # QUANTITATIVE INSIGHT: Trending markets = wider TP, Ranging = tighter TP
+    REGIME_MULTIPLIERS = {
+        'TRENDING_UP': {'tp_mult': 2.5, 'sl_mult': 0.8, 'rr': 3.1},    # Ride the trend
+        'TRENDING_DOWN': {'tp_mult': 2.5, 'sl_mult': 0.8, 'rr': 3.1},  # Ride the trend
+        'RANGING': {'tp_mult': 1.2, 'sl_mult': 0.8, 'rr': 1.5},        # Quick scalps
+        'VOLATILE': {'tp_mult': 3.0, 'sl_mult': 1.5, 'rr': 2.0},       # Wider stops
+        'BREAKOUT': {'tp_mult': 4.0, 'sl_mult': 0.5, 'rr': 8.0},       # Big move potential
+        'LOW_VOL': {'tp_mult': 1.0, 'sl_mult': 0.6, 'rr': 1.7},        # Tight range
+    }
+    
     def __init__(self):
         """Initialize adaptive risk manager."""
         # Base risk parameters from env
@@ -40,17 +51,17 @@ class AdaptiveRiskManager:
         # ATR multipliers for TP/SL - PROFIT FOCUSED
         # With 5x leverage:
         #   - 1% price move = 5% PnL
-        #   - SL at 1.5x ATR (~0.4%) = ~2% loss
-        #   - TP at 4x ATR (~1.1%) = ~5.5% gain  
-        #   - R:R = 2.75:1 = You can lose 2 trades, win 1, and still profit!
-        self.atr_sl_multiplier = Decimal(os.getenv('ATR_SL_MULTIPLIER', '1.5'))
-        self.atr_tp_multiplier = Decimal(os.getenv('ATR_TP_MULTIPLIER', '4.0'))
+        #   - SL at 1.2x ATR (~0.35%) = ~1.75% loss
+        #   - TP at 4.5x ATR (~1.3%) = ~6.5% gain  
+        #   - R:R = 3.75:1 = You can lose 3 trades, win 1, and still profit!
+        self.atr_sl_multiplier = Decimal(os.getenv('ATR_SL_MULTIPLIER', '1.2'))
+        self.atr_tp_multiplier = Decimal(os.getenv('ATR_TP_MULTIPLIER', '4.5'))
         
         # Minimum/Maximum bounds - REAL MONEY TARGETS
         self.min_sl_pct = Decimal('0.3')   # Minimum 0.3% SL (tight but safe)
         self.max_sl_pct = Decimal('2.0')   # Maximum 2% SL (10% account loss with 5x)
         self.min_tp_pct = Decimal('0.8')   # Minimum 0.8% TP (4% account gain with 5x)
-        self.max_tp_pct = Decimal('5.0')   # Maximum 5% TP (25% account gain with 5x)
+        self.max_tp_pct = Decimal('6.0')   # Maximum 6% TP (30% account gain with 5x)
         
         # Risk reduction after losses
         self.consecutive_loss_count = 0
@@ -136,6 +147,67 @@ class AdaptiveRiskManager:
             'rr_ratio': float(tp_pct / sl_pct),
             'position_size_pct': float(position_size_pct),
             'atr_used': float(atr),
+        }
+    
+    def get_regime_params(self, regime: str) -> Dict[str, float]:
+        """
+        Get optimized TP/SL multipliers for a specific market regime.
+        
+        Regime-Based Optimization:
+        - TRENDING: Wide TP (ride the trend), tight SL
+        - RANGING: Tight TP (scalp), tight SL  
+        - VOLATILE: Wide everything (big moves)
+        - BREAKOUT: Very wide TP (capture the move), very tight SL
+        
+        Args:
+            regime: Market regime name (TRENDING_UP, TRENDING_DOWN, RANGING, etc.)
+            
+        Returns:
+            Dict with tp_multiplier, sl_multiplier, expected_rr
+        """
+        # Normalize regime name
+        regime_key = regime.upper().replace(' ', '_')
+        
+        # Get regime-specific params or default
+        if regime_key in self.REGIME_MULTIPLIERS:
+            params = self.REGIME_MULTIPLIERS[regime_key]
+            return {
+                'tp_multiplier': params['tp_mult'],
+                'sl_multiplier': params['sl_mult'],
+                'expected_rr': params['rr'],
+            }
+        
+        # Check for partial matches
+        if 'TREND' in regime_key:
+            return {
+                'tp_multiplier': 2.5,
+                'sl_multiplier': 0.8,
+                'expected_rr': 3.1,
+            }
+        elif 'RANGE' in regime_key or 'SIDEWAYS' in regime_key:
+            return {
+                'tp_multiplier': 1.2,
+                'sl_multiplier': 0.8,
+                'expected_rr': 1.5,
+            }
+        elif 'VOLATILE' in regime_key or 'CHOPPY' in regime_key:
+            return {
+                'tp_multiplier': 3.0,
+                'sl_multiplier': 1.5,
+                'expected_rr': 2.0,
+            }
+        elif 'BREAK' in regime_key:
+            return {
+                'tp_multiplier': 4.0,
+                'sl_multiplier': 0.5,
+                'expected_rr': 8.0,
+            }
+        
+        # Default: balanced
+        return {
+            'tp_multiplier': 1.0,
+            'sl_multiplier': 1.0,
+            'expected_rr': float(self.atr_tp_multiplier / self.atr_sl_multiplier),
         }
     
     def calculate_position_size(

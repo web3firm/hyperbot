@@ -5,6 +5,8 @@ Detects institutional trading patterns:
 - Order Blocks
 - Liquidity Sweeps
 - Imbalance Zones
+- Break of Structure (BoS) - NEW
+- Change of Character (ChoCh) - NEW
 """
 
 import os
@@ -31,6 +33,16 @@ class ZoneType(Enum):
 
 
 @dataclass
+class BreakOfStructure:
+    """Represents a Break of Structure (BoS) event."""
+    bos_type: str  # 'bullish_bos' or 'bearish_bos'
+    level: Decimal
+    broken_at: datetime
+    strength: float  # 0-1
+    confirmed: bool = False
+
+
+@dataclass
 class SmartMoneyZone:
     """Represents a smart money zone on the chart."""
     zone_type: ZoneType
@@ -51,12 +63,15 @@ class SmartMoneyAnalyzer:
     2. Order Blocks - Zones where big players accumulated/distributed
     3. Liquidity Sweeps - Stop hunts before real moves
     4. Imbalance Zones - Areas of aggressive buying/selling
+    5. Break of Structure (BoS) - Structure confirmation
+    6. Change of Character (ChoCh) - Trend reversal confirmation
     
     Trading Edge:
     - Enter at FVGs when price returns
     - Trade with order blocks, not against
     - Fade liquidity sweeps
     - Target liquidity pools
+    - Only enter after BoS confirmation
     """
     
     def __init__(self):
@@ -66,6 +81,7 @@ class SmartMoneyAnalyzer:
         self.ob_lookback = int(os.getenv('ORDER_BLOCK_LOOKBACK', '50'))
         self.liquidity_lookback = int(os.getenv('LIQUIDITY_LOOKBACK', '20'))
         self.zone_expiry_bars = int(os.getenv('SMC_ZONE_EXPIRY_BARS', '100'))
+        self.bos_lookback = int(os.getenv('BOS_LOOKBACK', '20'))
         
         # Active zones
         self.fvg_zones: List[SmartMoneyZone] = []
@@ -75,10 +91,15 @@ class SmartMoneyAnalyzer:
         # Sweep detection
         self.recent_sweeps: deque = deque(maxlen=10)
         
+        # Break of Structure tracking
+        self.recent_bos: deque = deque(maxlen=5)
+        self.market_structure: str = 'unknown'  # 'bullish', 'bearish', 'unknown'
+        
         logger.info("💰 Smart Money Analyzer initialized")
         logger.info(f"   FVG Min Gap: {self.fvg_min_gap_pct}%")
         logger.info(f"   Order Block Lookback: {self.ob_lookback}")
         logger.info(f"   Liquidity Lookback: {self.liquidity_lookback}")
+        logger.info(f"   BoS Lookback: {self.bos_lookback}")
     
     def analyze(self, candles: List[Dict]) -> Dict[str, Any]:
         """
@@ -88,13 +109,14 @@ class SmartMoneyAnalyzer:
             Dict with zones, signals, and bias
         """
         if len(candles) < 50:
-            return {'bias': None, 'zones': [], 'signals': []}
+            return {'bias': None, 'zones': [], 'signals': [], 'bos': None}
         
         # Detect all patterns
         fvgs = self.detect_fair_value_gaps(candles)
         obs = self.detect_order_blocks(candles)
         liquidity = self.detect_liquidity_levels(candles)
         sweeps = self.detect_liquidity_sweeps(candles)
+        bos = self.detect_break_of_structure(candles)
         
         # Update internal state
         self.fvg_zones = fvgs
@@ -115,7 +137,142 @@ class SmartMoneyAnalyzer:
             'liquidity_levels': liquidity,
             'recent_sweeps': list(sweeps),
             'signals': signals,
+            'bos': bos,
+            'market_structure': self.market_structure,
+            'structure_confirmed': bos is not None and bos.confirmed,
         }
+    
+    def detect_break_of_structure(self, candles: List[Dict]) -> Optional[BreakOfStructure]:
+        """
+        Detect Break of Structure (BoS).
+        
+        SMC CORE: Don't enter until structure confirms direction.
+        
+        - Bullish BoS: Price closes above previous swing high
+        - Bearish BoS: Price closes below previous swing low
+        
+        Returns:
+            BreakOfStructure if detected, None otherwise
+        """
+        if len(candles) < self.bos_lookback:
+            return None
+        
+        lookback_candles = candles[-self.bos_lookback:]
+        current_candle = candles[-1]
+        current_close = Decimal(str(current_candle.get('close', current_candle.get('c', 0))))
+        
+        # Get swing highs and lows from lookback period (excluding last 3 candles)
+        swing_highs = []
+        swing_lows = []
+        
+        for i in range(2, len(lookback_candles) - 3):
+            high = Decimal(str(lookback_candles[i].get('high', lookback_candles[i].get('h', 0))))
+            low = Decimal(str(lookback_candles[i].get('low', lookback_candles[i].get('l', 0))))
+            
+            # Check if swing high (local maximum)
+            is_swing_high = True
+            for j in range(-2, 3):
+                if j == 0:
+                    continue
+                neighbor_high = Decimal(str(lookback_candles[i+j].get('high', lookback_candles[i+j].get('h', 0))))
+                if neighbor_high >= high:
+                    is_swing_high = False
+                    break
+            if is_swing_high:
+                swing_highs.append(high)
+            
+            # Check if swing low (local minimum)
+            is_swing_low = True
+            for j in range(-2, 3):
+                if j == 0:
+                    continue
+                neighbor_low = Decimal(str(lookback_candles[i+j].get('low', lookback_candles[i+j].get('l', 0))))
+                if neighbor_low <= low:
+                    is_swing_low = False
+                    break
+            if is_swing_low:
+                swing_lows.append(low)
+        
+        if not swing_highs or not swing_lows:
+            return None
+        
+        # Get the most recent significant swing points
+        recent_high = max(swing_highs[-5:]) if len(swing_highs) >= 1 else swing_highs[-1] if swing_highs else None
+        recent_low = min(swing_lows[-5:]) if len(swing_lows) >= 1 else swing_lows[-1] if swing_lows else None
+        
+        if not recent_high or not recent_low:
+            return None
+        
+        # Check for Bullish BoS: Close above swing high
+        if current_close > recent_high:
+            bos = BreakOfStructure(
+                bos_type='bullish_bos',
+                level=recent_high,
+                broken_at=datetime.now(timezone.utc),
+                strength=min(1.0, float((current_close - recent_high) / recent_high * 100)),
+                confirmed=True,
+            )
+            self.recent_bos.append(bos)
+            self.market_structure = 'bullish'
+            logger.info(f"📈 BULLISH BoS: Closed above swing high ${recent_high}")
+            return bos
+        
+        # Check for Bearish BoS: Close below swing low
+        elif current_close < recent_low:
+            bos = BreakOfStructure(
+                bos_type='bearish_bos',
+                level=recent_low,
+                broken_at=datetime.now(timezone.utc),
+                strength=min(1.0, float((recent_low - current_close) / recent_low * 100)),
+                confirmed=True,
+            )
+            self.recent_bos.append(bos)
+            self.market_structure = 'bearish'
+            logger.info(f"📉 BEARISH BoS: Closed below swing low ${recent_low}")
+            return bos
+        
+        return None
+    
+    def get_bos_signal(self, direction: str) -> Tuple[float, str]:
+        """
+        Get signal score modifier based on Break of Structure.
+        
+        Args:
+            direction: 'long' or 'short'
+            
+        Returns:
+            Tuple of (score_modifier, reason)
+        """
+        if not self.recent_bos:
+            return 0.0, "No recent BoS"
+        
+        latest_bos = self.recent_bos[-1]
+        
+        # BoS alignment with trade direction
+        if direction == 'long' and latest_bos.bos_type == 'bullish_bos':
+            return 1.5 * latest_bos.strength, "Bullish BoS confirms long"
+        elif direction == 'short' and latest_bos.bos_type == 'bearish_bos':
+            return 1.5 * latest_bos.strength, "Bearish BoS confirms short"
+        
+        # BoS against trade direction = penalty
+        elif direction == 'long' and latest_bos.bos_type == 'bearish_bos':
+            return -1.0, "Bearish BoS contradicts long"
+        elif direction == 'short' and latest_bos.bos_type == 'bullish_bos':
+            return -1.0, "Bullish BoS contradicts short"
+        
+        return 0.0, "No BoS signal"
+    
+    def is_structure_confirmed(self, direction: str) -> bool:
+        """
+        Check if market structure confirms trade direction.
+        
+        Pro rule: Don't enter until structure confirms.
+        """
+        if direction == 'long':
+            return self.market_structure == 'bullish'
+        elif direction == 'short':
+            return self.market_structure == 'bearish'
+        return False
     
     def detect_fair_value_gaps(self, candles: List[Dict]) -> List[SmartMoneyZone]:
         """
