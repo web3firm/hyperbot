@@ -4,7 +4,7 @@ Multiple safety triggers to halt trading immediately
 """
 
 import logging
-from typing import Dict, Any, Optional, Callable
+from typing import Dict, Any, Optional, Callable, List
 from decimal import Decimal
 from datetime import datetime, timezone
 from enum import Enum
@@ -62,8 +62,8 @@ class KillSwitch:
         self.recent_trades = []
         self.max_recent_items = 20
         
-        # Callbacks
-        self.on_trigger_callbacks: list[Callable] = []
+        # Callbacks (Python 3.8+ compatible)
+        self.on_trigger_callbacks: List[Callable] = []
         
         # Auto-reset configuration
         self.auto_reset_enabled = cfg.get('auto_reset_enabled', False)

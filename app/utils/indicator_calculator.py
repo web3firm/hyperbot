@@ -36,13 +36,14 @@ class IndicatorCalculator:
         
         logger.info("📊 Shared Indicator Calculator initialized (Phase 5)")
     
-    def calculate_all(self, prices: List[Decimal], volumes: List[Decimal] = None) -> Dict[str, Any]:
+    def calculate_all(self, prices: List[Decimal], volumes: List[Decimal] = None, candles: List[Dict] = None) -> Dict[str, Any]:
         """
         Calculate all indicators at once
         
         Args:
             prices: List of close prices
             volumes: Optional list of volumes
+            candles: Optional list of candle dicts with high/low/close for proper ADX/ATR
             
         Returns:
             Dictionary of all calculated indicators
@@ -82,13 +83,19 @@ class IndicatorCalculator:
         if bb:
             indicators['bb'] = bb
         
-        # ADX (trend strength)
-        adx = self._calculate_adx(prices, 14)
+        # ADX (trend strength) - use proper H/L/C if candles provided
+        if candles and len(candles) >= 28:
+            adx = self._calculate_adx_from_candles(candles, 14)
+        else:
+            adx = self._calculate_adx(prices, 14)
         if adx:
             indicators['adx'] = adx
         
-        # ATR (volatility)
-        atr = self._calculate_atr(prices, 14)
+        # ATR (volatility) - use proper H/L/C if candles provided
+        if candles and len(candles) >= 15:
+            atr = self._calculate_atr_from_candles(candles, 14)
+        else:
+            atr = self._calculate_atr(prices, 14)
         if atr:
             indicators['atr'] = atr
             indicators['atr_pct'] = (atr / prices[-1]) * 100 if prices[-1] > 0 else Decimal('0')
@@ -258,6 +265,77 @@ class IndicatorCalculator:
         atr = sum(tr_list[-period:]) / period
         return atr
     
+    def _calculate_adx_from_candles(self, candles: List[Dict], period: int = 14) -> Optional[Decimal]:
+        """Calculate ADX using proper True Range (H/L/C) from candles."""
+        if len(candles) < period * 2:
+            return None
+        
+        tr_list = []
+        plus_dm_list = []
+        minus_dm_list = []
+        
+        for i in range(1, len(candles)):
+            high = Decimal(str(candles[i].get('high', candles[i].get('h', 0))))
+            low = Decimal(str(candles[i].get('low', candles[i].get('l', 0))))
+            prev_high = Decimal(str(candles[i-1].get('high', candles[i-1].get('h', 0))))
+            prev_low = Decimal(str(candles[i-1].get('low', candles[i-1].get('l', 0))))
+            prev_close = Decimal(str(candles[i-1].get('close', candles[i-1].get('c', 0))))
+            
+            # True Range = max(H-L, |H-prev_close|, |L-prev_close|)
+            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+            tr_list.append(tr)
+            
+            # Directional Movement
+            up_move = high - prev_high
+            down_move = prev_low - low
+            
+            plus_dm = up_move if (up_move > down_move and up_move > 0) else Decimal('0')
+            minus_dm = down_move if (down_move > up_move and down_move > 0) else Decimal('0')
+            
+            plus_dm_list.append(plus_dm)
+            minus_dm_list.append(minus_dm)
+        
+        if len(tr_list) < period:
+            return None
+        
+        atr = sum(tr_list[-period:]) / period
+        plus_dm_avg = sum(plus_dm_list[-period:]) / period
+        minus_dm_avg = sum(minus_dm_list[-period:]) / period
+        
+        plus_di = (plus_dm_avg / atr * 100) if atr > 0 else Decimal('0')
+        minus_di = (minus_dm_avg / atr * 100) if atr > 0 else Decimal('0')
+        
+        di_sum = plus_di + minus_di
+        di_diff = abs(plus_di - minus_di)
+        dx = (di_diff / di_sum * 100) if di_sum > 0 else Decimal('0')
+        
+        if self.adx_value is None:
+            self.adx_value = dx
+        else:
+            self.adx_value = (self.adx_value * (period - 1) + dx) / period
+        
+        return self.adx_value
+    
+    def _calculate_atr_from_candles(self, candles: List[Dict], period: int = 14) -> Optional[Decimal]:
+        """Calculate ATR using proper True Range (H/L/C) from candles."""
+        if len(candles) < period + 1:
+            return None
+        
+        tr_list = []
+        for i in range(1, len(candles)):
+            high = Decimal(str(candles[i].get('high', candles[i].get('h', 0))))
+            low = Decimal(str(candles[i].get('low', candles[i].get('l', 0))))
+            prev_close = Decimal(str(candles[i-1].get('close', candles[i-1].get('c', 0))))
+            
+            # True Range = max(H-L, |H-prev_close|, |L-prev_close|)
+            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+            tr_list.append(tr)
+        
+        if len(tr_list) < period:
+            return None
+        
+        atr = sum(tr_list[-period:]) / period
+        return atr
     def invalidate_cache(self):
         """Invalidate cache on new candle"""
         self._indicator_cache = {}

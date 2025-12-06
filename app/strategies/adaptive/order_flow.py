@@ -44,6 +44,7 @@ class OrderFlowAnalyzer:
         self.whale_threshold_usd = Decimal(os.getenv('WHALE_THRESHOLD_USD', '50000'))
         self.large_trade_threshold_usd = Decimal(os.getenv('LARGE_TRADE_THRESHOLD_USD', '10000'))
         self.volume_profile_bins = int(os.getenv('VOLUME_PROFILE_BINS', '20'))
+        self.volume_profile_bin_pct = Decimal(os.getenv('VOLUME_PROFILE_BIN_PCT', '0.1'))  # 0.1% bins
         
         # State tracking
         self.recent_trades: deque = deque(maxlen=1000)
@@ -309,8 +310,8 @@ class OrderFlowAnalyzer:
     
     def _update_volume_profile(self, price: Decimal, volume: Decimal):
         """Update volume profile with new data."""
-        # Round price to bin
-        bin_size = Decimal('0.1')  # 0.1% bins
+        # Round price to bin (configurable bin size)
+        bin_size = self.volume_profile_bin_pct
         binned_price = round(price / bin_size) * bin_size
         
         if binned_price in self.volume_profile:

@@ -211,7 +211,12 @@ class SmallAccountMode:
         }
     
     def apply_config(self):
-        """Apply small account config overrides to environment."""
+        """
+        Apply small account config overrides to environment.
+        
+        Note: This modifies global os.environ. It's called once at bot startup
+        to configure the trading parameters for small accounts.
+        """
         overrides = self.get_config_overrides()
         for key, value in overrides.items():
             os.environ[key] = value

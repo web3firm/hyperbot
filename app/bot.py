@@ -1195,8 +1195,10 @@ class HyperAIBot:
                             prices_list = [Decimal(str(c['close'])) for c in self._candles_cache]
                             volumes_list = [Decimal(str(c['volume'])) for c in self._candles_cache]
                             
-                            # Calculate all indicators once
-                            shared_indicators = self.indicator_calc.calculate_all(prices_list, volumes_list)
+                            # Calculate all indicators once (pass candles for proper ADX/ATR)
+                            shared_indicators = self.indicator_calc.calculate_all(
+                                prices_list, volumes_list, candles=self._candles_cache
+                            )
                             
                             # Add to market_data
                             market_data['indicators'] = shared_indicators
