@@ -282,6 +282,10 @@ class HyperAIBot:
         self._position_check_interval = 3.0  # Default 3 seconds
         self._atr_value: Optional[Decimal] = None  # Current ATR for adaptive monitoring
         
+        # Trailing stop throttle - avoid spam updates (minimum 30 seconds between updates per symbol)
+        self._last_trail_update: Dict[str, datetime] = {}
+        self._trail_update_interval = 30  # Minimum seconds between trail updates
+        
         # Error handler
         self.error_handler: Optional[ErrorHandler] = None
         
@@ -832,18 +836,29 @@ class HyperAIBot:
                     # Store entry price in order manager for trailing calculation
                     self.order_manager.set_entry_price(symbol, float(entry_price))
                     
+                    # ==================== TRAILING STOP THROTTLE ====================
+                    # Avoid spam orders - only update trailing stops every 30 seconds per symbol
+                    now = datetime.now(timezone.utc)
+                    last_trail = self._last_trail_update.get(symbol)
+                    can_update_trail = (
+                        last_trail is None or 
+                        (now - last_trail).total_seconds() >= self._trail_update_interval
+                    )
+                    
                     # ==================== SCALPING MICRO-TRAIL ====================
                     # For scalps (small TP targets like 0.3-0.5%), trail immediately
-                    # Activates at just 0.1% profit and trails at 0.08%
+                    # Activates at just 0.5% profit and trails at 0.08%
                     
-                    if unrealized_pnl_pct >= 0.5:  # 0.1% PnL = 0.02% price with 5x
+                    if can_update_trail and unrealized_pnl_pct >= 0.5:
                         # Use the order_manager's trailing stop function
                         trail_result = self.order_manager.update_trailing_stop(
                             symbol=symbol,
                             current_price=float(current_price),
-                            trail_pct=0.08  # 0.08% trailing distance
+                            trail_pct=0.08,  # 0.08% trailing distance
+                            min_update_pct=0.05  # Only update if SL moves > 0.05%
                         )
                         if trail_result:
+                            self._last_trail_update[symbol] = now
                             logger.info(f"⚡ SCALP TRAIL: Moved SL closer at {unrealized_pnl_pct:.2f}% PnL")
                     
                     # ==================== SWING TRAILING ====================
@@ -906,7 +921,8 @@ class HyperAIBot:
                                 needs_update = True
                     
                     # ✅ ACTUALLY UPDATE ORDERS ON EXCHANGE (Phase 3 fix!)
-                    if needs_update:
+                    # Only update if throttle allows (prevent spam)
+                    if needs_update and can_update_trail:
                         try:
                             result = await self.order_manager.modify_stops(
                                 symbol=symbol,
@@ -914,6 +930,7 @@ class HyperAIBot:
                                 new_tp=new_tp
                             )
                             if result.get('success'):
+                                self._last_trail_update[symbol] = now
                                 logger.info(f"✅ Trailing stops updated on exchange: {result.get('modified', [])}")
                             else:
                                 logger.warning(f"⚠️ Failed to update trailing stops: {result.get('error')}")

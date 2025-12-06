@@ -1130,7 +1130,8 @@ class HLOrderManager:
     
     # ==================== TRAILING STOP ====================
     def update_trailing_stop(self, symbol: str, current_price: float, 
-                             trail_pct: float = 0.15) -> Optional[Dict]:
+                             trail_pct: float = 0.15,
+                             min_update_pct: float = 0.05) -> Optional[Dict]:
         """
         Update trailing stop for an existing position.
         
@@ -1142,6 +1143,7 @@ class HLOrderManager:
             symbol: Trading pair
             current_price: Current market price
             trail_pct: Trail distance as percentage (default 0.15%)
+            min_update_pct: Minimum SL change % to trigger update (default 0.05% = $45 on BTC)
         
         Returns:
             Updated SL order result or None
@@ -1166,10 +1168,17 @@ class HLOrderManager:
             # Only update if:
             # 1. Price is above entry (in profit)
             # 2. New SL is higher than current SL (tightening)
+            # 3. Change is significant (> min_update_pct)
             if current_price <= entry_price:
                 return None  # Not in profit yet
             if current_sl and new_sl <= current_sl:
                 return None  # Would loosen the stop
+            
+            # Check minimum change threshold
+            if current_sl:
+                change_pct = abs(new_sl - current_sl) / current_sl * 100
+                if change_pct < min_update_pct:
+                    return None  # Change too small, avoid spam orders
                 
         else:
             # For shorts: trail above current price
@@ -1178,10 +1187,17 @@ class HLOrderManager:
             # Only update if:
             # 1. Price is below entry (in profit)
             # 2. New SL is lower than current SL (tightening)
+            # 3. Change is significant (> min_update_pct)
             if current_price >= entry_price:
                 return None  # Not in profit yet
             if current_sl and new_sl >= current_sl:
                 return None  # Would loosen the stop
+            
+            # Check minimum change threshold
+            if current_sl:
+                change_pct = abs(new_sl - current_sl) / current_sl * 100
+                if change_pct < min_update_pct:
+                    return None  # Change too small, avoid spam orders
         
         # Cancel old SL and place new one
         try:
