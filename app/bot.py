@@ -413,12 +413,12 @@ class HyperAIBot:
             
             # Phase 6: Initialize Position Manager (manages manual orders + early exit)
             position_manager_config = {
-                'check_interval_seconds': 30,  # Check every 30 seconds (less aggressive)
-                'auto_tpsl': False,  # DISABLED for testing - let signals set TP/SL
-                'early_exit': False,  # DISABLED for testing
-                'health_check': False,  # DISABLED for testing
-                'trailing_stop': False,  # DISABLED for testing
-                'break_even': False,  # DISABLED for testing
+                'check_interval_seconds': 30,  # Check every 30 seconds
+                'auto_tpsl': True,  # Auto-set TP/SL on unprotected positions
+                'early_exit': True,  # Exit on failed setups
+                'health_check': True,  # Monitor position health
+                'trailing_stop': True,  # Enable trailing stops
+                'break_even': True,  # Move SL to entry after profit
                 'default_tp_pct': 3.0,  # Default TP = 3%
                 'default_sl_pct': 1.5,  # Default SL = 1.5%
             }
@@ -428,7 +428,7 @@ class HyperAIBot:
                 strategy=self.strategy,
                 config=position_manager_config
             )
-            logger.info("🎯 Phase 6: Position Manager initialized (features disabled for testing)")
+            logger.info("🎯 Phase 6: Position Manager initialized (all features enabled)")
             
             # Get initial account state
             await self.update_account_state()
@@ -1017,6 +1017,23 @@ class HyperAIBot:
         self.is_running = True
         self.start_time = datetime.now(timezone.utc)
         loop_count = 0
+        
+        # IMMEDIATE STARTUP: Detect existing positions and protect them
+        if self.position_manager:
+            logger.info("🔍 Scanning for existing positions on startup...")
+            try:
+                existing_positions = await self.position_manager.scan_positions()
+                if existing_positions:
+                    logger.info(f"📍 Found {len(existing_positions)} existing position(s):")
+                    for pos in existing_positions:
+                        logger.info(f"   • {pos.symbol} {pos.side.upper()} @ ${pos.entry_price:.4f} "
+                                   f"(PnL: {pos.unrealized_pnl_pct:+.2f}%)")
+                        # Immediately try to set TP/SL
+                        await self.position_manager.manage_position(pos, self._candles_cache)
+                else:
+                    logger.info("   No existing positions found")
+            except Exception as e:
+                logger.error(f"Error scanning positions on startup: {e}")
         
         # Start Position Manager monitoring loop (runs in parallel)
         position_manager_task = None
