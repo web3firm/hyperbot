@@ -19,8 +19,17 @@ from decimal import Decimal
 from typing import Dict, Any, Optional, Tuple, List
 from enum import Enum
 from datetime import datetime, timezone, timedelta
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class FilterResult:
+    """Result of filter check."""
+    passed: bool
+    reason: str
+    confidence: float = 0.5
 
 
 class VolatilityRegime(Enum):
@@ -88,14 +97,6 @@ class ProTradingFilters:
         Returns:
             FilterResult with passed, reason, confidence
         """
-        from dataclasses import dataclass
-        
-        @dataclass
-        class FilterResult:
-            passed: bool
-            reason: str
-            confidence: float = 0.5
-        
         checks_passed = 0
         total_checks = 0
         reasons = []
