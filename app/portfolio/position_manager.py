@@ -395,12 +395,12 @@ class PositionManager:
                 entry = position.entry_price
                 
                 # Add small buffer (0.1%) to lock in a tiny profit
-                # For LONG: SL slightly above entry (triggers if price drops to entry)
-                # For SHORT: SL slightly below entry (triggers if price rises to entry)
+                # For LONG: SL slightly above entry (locks in 0.1% profit when price drops)
+                # For SHORT: SL slightly below entry (locks in 0.1% profit when price rises)
                 if position.side == 'long':
-                    new_sl = entry * 1.001  # Slightly above entry
+                    new_sl = entry * 1.001  # Slightly above entry for longs
                 else:
-                    new_sl = entry * 1.001  # For SHORT: slightly ABOVE entry (exit when price rises back)
+                    new_sl = entry * 0.999  # Slightly below entry for shorts (locks in profit)
                 
                 logger.info(f"🔒 Break-even activated for {position.symbol}")
                 logger.info(f"   Profit: {position.unrealized_pnl_pct:.2f}%")

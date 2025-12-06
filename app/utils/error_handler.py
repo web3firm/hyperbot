@@ -79,7 +79,7 @@ class ErrorHandler:
                         f"⚠️ Check logs immediately!\n"
                         f"Consider manual restart if issues persist."
                     )
-                except:
+                except Exception:
                     pass
     
     async def handle_recoverable_error(self, error: Exception, context: str = "Unknown"):
@@ -101,7 +101,7 @@ class ErrorHandler:
                     f"Issue: {str(error)[:150]}\n\n"
                     f"Bot is handling this automatically."
                 )
-            except:
+            except Exception:
                 pass
     
     def reset_consecutive_errors(self):

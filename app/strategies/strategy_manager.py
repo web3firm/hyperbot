@@ -225,6 +225,8 @@ class StrategyManager:
     def _round_robin_select(self, signals: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         Round-robin selection between strategies
+        NOTE: With SWING ONLY mode, this just returns the first signal.
+        Kept for backwards compatibility if more strategies are added.
         
         Args:
             signals: List of valid signals
@@ -232,15 +234,23 @@ class StrategyManager:
         Returns:
             Selected signal
         """
+        if not signals:
+            return None
+        
+        # With only swing strategy, just return first signal
+        if len(self.strategies) == 1:
+            return signals[0]
+        
         if not self.last_strategy_used:
             return signals[0]
         
-        # Find next strategy in rotation
-        strategy_order = ['momentum', 'mean_reversion', 'breakout', 'volume_spike']
+        # Find next strategy in rotation based on registered strategies
+        strategy_names = list(self.strategies.keys())
         
         try:
-            last_idx = strategy_order.index(self.last_strategy_used)
-            next_strategies = strategy_order[last_idx + 1:] + strategy_order[:last_idx + 1]
+            last_idx = strategy_names.index(self.last_strategy_used)
+            next_idx = (last_idx + 1) % len(strategy_names)
+            next_strategies = strategy_names[next_idx:] + strategy_names[:next_idx]
             
             # Find first signal from next strategies
             for strategy_name in next_strategies:

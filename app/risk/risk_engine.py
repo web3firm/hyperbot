@@ -112,6 +112,13 @@ class RiskEngine:
         # 2. Check position size limit (based on collateral, not leveraged notional)
         trade_value = size * price
         equity = self.account_manager.current_equity
+        
+        # Guard against division by zero
+        if equity <= 0:
+            return False, "Invalid equity: cannot calculate position size"
+        if self.limits.max_leverage <= 0:
+            return False, "Invalid leverage configuration"
+            
         # Calculate collateral needed (trade value divided by leverage)
         collateral_pct = (trade_value / self.limits.max_leverage / equity) * 100
         
@@ -139,14 +146,18 @@ class RiskEngine:
             return False, f"Already have position in {symbol}"
         
         # 6. Check daily loss limit
-        daily_loss_pct = abs(self.account_manager.session_pnl / self.account_manager.session_start_equity * 100)
-        if self.account_manager.session_pnl < 0 and daily_loss_pct >= self.limits.max_daily_loss_pct:
-            return False, f"Daily loss limit reached: {daily_loss_pct:.2f}% >= {self.limits.max_daily_loss_pct}%"
+        session_start_equity = self.account_manager.session_start_equity
+        if session_start_equity > 0:
+            daily_loss_pct = abs(self.account_manager.session_pnl / session_start_equity * 100)
+            if self.account_manager.session_pnl < 0 and daily_loss_pct >= self.limits.max_daily_loss_pct:
+                return False, f"Daily loss limit reached: {daily_loss_pct:.2f}% >= {self.limits.max_daily_loss_pct}%"
         
         # 7. Check drawdown limit
-        current_drawdown = (self.account_manager.peak_equity - equity) / self.account_manager.peak_equity * 100
-        if current_drawdown >= self.limits.max_drawdown_pct:
-            return False, f"Drawdown limit reached: {current_drawdown:.2f}% >= {self.limits.max_drawdown_pct}%"
+        peak_equity = self.account_manager.peak_equity
+        if peak_equity > 0:
+            current_drawdown = (peak_equity - equity) / peak_equity * 100
+            if current_drawdown >= self.limits.max_drawdown_pct:
+                return False, f"Drawdown limit reached: {current_drawdown:.2f}% >= {self.limits.max_drawdown_pct}%"
         
         # 8. Check trade frequency
         if self.hourly_trades >= self.limits.max_trades_per_hour:
@@ -186,20 +197,26 @@ class RiskEngine:
         score = 0
         
         # Factor 1: Margin usage (0-25 points)
-        margin_usage = float(self.account_manager.margin_used / self.account_manager.current_equity * 100)
-        score += min(25, margin_usage / 4)
+        current_equity = self.account_manager.current_equity
+        if current_equity > 0:
+            margin_usage = float(self.account_manager.margin_used / current_equity * 100)
+            score += min(25, margin_usage / 4)
         
         # Factor 2: Drawdown (0-25 points)
-        drawdown = float((self.account_manager.peak_equity - self.account_manager.current_equity) / self.account_manager.peak_equity * 100)
-        score += min(25, drawdown * 2.5)
+        peak_equity = self.account_manager.peak_equity
+        if peak_equity > 0:
+            drawdown = float((peak_equity - current_equity) / peak_equity * 100)
+            score += min(25, max(0, drawdown * 2.5))  # Ensure non-negative
         
         # Factor 3: Position count (0-25 points)
-        position_count_pct = (len(self.position_manager.open_positions) / self.limits.max_positions) * 100
-        score += min(25, position_count_pct / 4)
+        if self.limits.max_positions > 0:
+            position_count_pct = (len(self.position_manager.open_positions) / self.limits.max_positions) * 100
+            score += min(25, position_count_pct / 4)
         
         # Factor 4: Daily P&L (0-25 points)
-        if self.account_manager.session_pnl < 0:
-            daily_loss_pct = abs(float(self.account_manager.session_pnl / self.account_manager.session_start_equity * 100))
+        session_start_equity = self.account_manager.session_start_equity
+        if self.account_manager.session_pnl < 0 and session_start_equity > 0:
+            daily_loss_pct = abs(float(self.account_manager.session_pnl / session_start_equity * 100))
             score += min(25, daily_loss_pct * 5)
         
         self.current_risk_score = int(score)

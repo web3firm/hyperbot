@@ -400,9 +400,11 @@ class DatabaseManager:
             """
             
             if limit:
-                query += f" LIMIT {limit}"
-            
-            rows = await conn.fetch(query)
+                # Use parameterized query to prevent SQL injection
+                query += " LIMIT $1"
+                rows = await conn.fetch(query, limit)
+            else:
+                rows = await conn.fetch(query)
             return [dict(row) for row in rows]
     
     # ==================== SYSTEM EVENTS ====================

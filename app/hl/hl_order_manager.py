@@ -34,10 +34,18 @@ class HLOrderManager:
         self.info = client.info
         self.address = client.address
         self.on_fill = on_fill
-        self._loop = asyncio.get_event_loop()
         
         # Position tracking for trailing stops
         self.position_orders: Dict[str, Dict[str, Any]] = {}
+    
+    @property
+    def _loop(self):
+        """Get the running event loop lazily (Python 3.10+ compatible)."""
+        try:
+            return asyncio.get_running_loop()
+        except RuntimeError:
+            # Not in async context, fall back to get_event_loop
+            return asyncio.get_event_loop()
     
     def _gen_cloid(self) -> Cloid:
         """Generate unique client order ID (0x + 32 hex chars)."""
@@ -732,6 +740,100 @@ class HLOrderManager:
         logger.info(f"bulk_cancel {len(cancels)} orders: {result}")
         return result
     
+    def cancel_sl_only(self, symbol: str, is_long: bool) -> Dict:
+        """
+        Cancel only SL orders for a symbol, preserving TP orders.
+        
+        For LONG positions: SL is a SELL below current price (triggerCondition='lt')
+        For SHORT positions: SL is a BUY above current price (triggerCondition='gt')
+        
+        Args:
+            symbol: Trading pair
+            is_long: True if position is long, False if short
+            
+        Returns:
+            Dict with cancelled orders info
+        """
+        try:
+            orders = self.client.get_frontend_open_orders(symbol)
+            if not orders:
+                return {"status": "ok", "cancelled": 0}
+            
+            sl_orders = []
+            for o in orders:
+                if not o.get('isTrigger', False):
+                    continue  # Not a trigger order
+                
+                trigger_cond = o.get('triggerCondition', '')
+                order_side = o.get('side', '')  # 'A' = sell, 'B' = buy
+                
+                # Identify SL orders:
+                # For LONG: SL is sell below (side='A', triggerCondition='lt')
+                # For SHORT: SL is buy above (side='B', triggerCondition='gt')
+                if is_long and order_side == 'A' and trigger_cond == 'lt':
+                    sl_orders.append({"coin": o["coin"], "oid": o["oid"]})
+                elif not is_long and order_side == 'B' and trigger_cond == 'gt':
+                    sl_orders.append({"coin": o["coin"], "oid": o["oid"]})
+            
+            if not sl_orders:
+                logger.info(f"No SL orders found to cancel for {symbol}")
+                return {"status": "ok", "cancelled": 0}
+            
+            result = self.exchange.bulk_cancel(sl_orders)
+            logger.info(f"Cancelled {len(sl_orders)} SL orders for {symbol}: {result}")
+            return {"status": "ok", "cancelled": len(sl_orders), "result": result}
+            
+        except Exception as e:
+            logger.error(f"Error cancelling SL orders: {e}")
+            return {"status": "error", "error": str(e)}
+    
+    def _cancel_tp_only(self, symbol: str, is_long: bool) -> Dict:
+        """
+        Cancel only TP orders for a symbol, preserving SL orders.
+        
+        For LONG positions: TP is a SELL above current price (triggerCondition='gt')
+        For SHORT positions: TP is a BUY below current price (triggerCondition='lt')
+        
+        Args:
+            symbol: Trading pair
+            is_long: True if position is long, False if short
+            
+        Returns:
+            Dict with cancelled orders info
+        """
+        try:
+            orders = self.client.get_frontend_open_orders(symbol)
+            if not orders:
+                return {"status": "ok", "cancelled": 0}
+            
+            tp_orders = []
+            for o in orders:
+                if not o.get('isTrigger', False):
+                    continue  # Not a trigger order
+                
+                trigger_cond = o.get('triggerCondition', '')
+                order_side = o.get('side', '')  # 'A' = sell, 'B' = buy
+                
+                # Identify TP orders:
+                # For LONG: TP is sell above (side='A', triggerCondition='gt')
+                # For SHORT: TP is buy below (side='B', triggerCondition='lt')
+                if is_long and order_side == 'A' and trigger_cond == 'gt':
+                    tp_orders.append({"coin": o["coin"], "oid": o["oid"]})
+                elif not is_long and order_side == 'B' and trigger_cond == 'lt':
+                    tp_orders.append({"coin": o["coin"], "oid": o["oid"]})
+            
+            if not tp_orders:
+                logger.info(f"No TP orders found to cancel for {symbol}")
+                return {"status": "ok", "cancelled": 0}
+            
+            result = self.exchange.bulk_cancel(tp_orders)
+            logger.info(f"Cancelled {len(tp_orders)} TP orders for {symbol}: {result}")
+            return {"status": "ok", "cancelled": len(tp_orders), "result": result}
+            
+        except Exception as e:
+            logger.error(f"Error cancelling TP orders: {e}")
+            return {"status": "error", "error": str(e)}
+    
     # ==================== DEAD MAN'S SWITCH ====================
     def schedule_cancel(self, seconds: int) -> Dict:
         """
@@ -819,8 +921,8 @@ class HLOrderManager:
         
         # Cancel old SL and place new one
         try:
-            # Cancel all open orders for this symbol (including old SL)
-            self.cancel_all(symbol)
+            # Cancel only SL orders, preserve TP orders
+            self.cancel_sl_only(symbol, is_long)
             
             # Round SL price to valid tick size
             rounded_sl = self.client.round_price(symbol, new_sl)
@@ -888,8 +990,17 @@ class HLOrderManager:
             
             modified = []
             
-            # Cancel existing orders first
-            self.cancel_all(symbol)
+            # Smart cancellation: only cancel the orders we're replacing
+            # If only modifying SL, keep TP intact (and vice versa)
+            if new_tp is not None and new_sl is not None:
+                # Modifying both - cancel all
+                self.cancel_all(symbol)
+            elif new_sl is not None:
+                # Only modifying SL - keep TP
+                self.cancel_sl_only(symbol, is_long)
+            elif new_tp is not None:
+                # Only modifying TP - keep SL
+                self._cancel_tp_only(symbol, is_long)
             
             # Set new TP if provided
             if new_tp is not None:

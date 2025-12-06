@@ -27,6 +27,7 @@ class PaperPosition:
     stop_loss: Decimal
     take_profit: Decimal
     entry_time: datetime
+    leverage: int = 5  # Store leverage for margin calculation
     unrealized_pnl: Decimal = Decimal('0')
     exit_price: Optional[Decimal] = None
     exit_time: Optional[datetime] = None
@@ -139,6 +140,7 @@ class PaperTradingEngine:
             stop_loss=stop_loss,
             take_profit=take_profit,
             entry_time=datetime.now(timezone.utc),
+            leverage=leverage,
         )
         
         self.positions[symbol] = position
@@ -248,7 +250,7 @@ class PaperTradingEngine:
         
         # Update balance
         notional = position.size * position.entry_price
-        margin_returned = notional / Decimal('5')  # Assume 5x leverage
+        margin_returned = notional / Decimal(str(position.leverage))  # Use position's leverage
         self.balance += margin_returned + pnl
         
         # Update stats

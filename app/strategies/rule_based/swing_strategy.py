@@ -167,6 +167,12 @@ class SwingStrategy:
             ema_slow=indicators.get('ema_slow'),
         )
         
+        # CRITICAL: Don't trade when regime is UNKNOWN (insufficient data/analysis)
+        from app.strategies.adaptive.market_regime import MarketRegime
+        if regime == MarketRegime.UNKNOWN:
+            logger.debug(f"⏸️ Regime UNKNOWN for {self.symbol} - skipping signal generation")
+            return None
+        
         # 3. Smart Money Concepts analysis
         smc_analysis = self.smc_analyzer.analyze(candles)
         
@@ -515,15 +521,43 @@ class SwingStrategy:
         return ema
     
     def _calculate_macd(self, prices: List[Decimal]) -> Dict:
-        """Calculate MACD."""
-        ema_12 = self._calculate_ema(prices, 12)
-        ema_26 = self._calculate_ema(prices, 26)
+        """Calculate MACD with proper signal line (EMA of MACD values)."""
+        # Need at least 26 + 9 = 35 prices to calculate signal line
+        if len(prices) < 35:
+            # Fallback: calculate just MACD line without proper signal
+            ema_12 = self._calculate_ema(prices, 12)
+            ema_26 = self._calculate_ema(prices, 26)
+            if not ema_12 or not ema_26:
+                return {}
+            macd_line = ema_12 - ema_26
+            return {
+                'macd': macd_line,
+                'signal': macd_line,  # No proper signal available
+                'histogram': Decimal('0'),
+            }
         
-        if not ema_12 or not ema_26:
+        # Calculate MACD values for the last 9 periods to build signal line
+        macd_values = []
+        for i in range(9):
+            # Use prices up to position -(8-i) from the end
+            # i=0: prices[:-8], i=1: prices[:-7], ... i=8: prices[:] (all)
+            end_idx = len(prices) - (8 - i) if i < 8 else len(prices)
+            price_slice = prices[:end_idx]
+            
+            ema_12 = self._calculate_ema(price_slice, 12)
+            ema_26 = self._calculate_ema(price_slice, 26)
+            
+            if ema_12 and ema_26:
+                macd_values.append(ema_12 - ema_26)
+        
+        if len(macd_values) < 9:
             return {}
         
-        macd_line = ema_12 - ema_26
-        signal_line = self._calculate_ema(list(prices[-9:]), 9) or macd_line
+        # Current MACD line is the last value
+        macd_line = macd_values[-1]
+        
+        # Signal line is EMA(9) of MACD values
+        signal_line = self._calculate_ema(macd_values, 9) or macd_line
         
         return {
             'macd': macd_line,
@@ -532,23 +566,35 @@ class SwingStrategy:
         }
     
     def _calculate_adx(self, candles: List[Dict], period: int = 14) -> Optional[Decimal]:
-        """Calculate ADX."""
+        """Calculate ADX with proper True Range (using H/L/C, not just close)."""
         if len(candles) < period * 2:
             return None
         
-        prices = [Decimal(str(c.get('close', c.get('c', 0)))) for c in candles]
-        
         tr_list, plus_dm_list, minus_dm_list = [], [], []
         
-        for i in range(1, len(prices)):
-            tr = abs(prices[i] - prices[i-1])
+        for i in range(1, len(candles)):
+            # Get OHLC data
+            high = Decimal(str(candles[i].get('high', candles[i].get('h', 0))))
+            low = Decimal(str(candles[i].get('low', candles[i].get('l', 0))))
+            prev_close = Decimal(str(candles[i-1].get('close', candles[i-1].get('c', 0))))
+            prev_high = Decimal(str(candles[i-1].get('high', candles[i-1].get('h', 0))))
+            prev_low = Decimal(str(candles[i-1].get('low', candles[i-1].get('l', 0))))
+            
+            # True Range = max(high-low, abs(high-prev_close), abs(low-prev_close))
+            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
             tr_list.append(tr)
             
-            up = prices[i] - prices[i-1] if prices[i] > prices[i-1] else Decimal('0')
-            down = prices[i-1] - prices[i] if prices[i-1] > prices[i] else Decimal('0')
+            # Directional Movement using high/low
+            up_move = high - prev_high
+            down_move = prev_low - low
             
-            plus_dm_list.append(up if up > down else Decimal('0'))
-            minus_dm_list.append(down if down > up else Decimal('0'))
+            # +DM: up move is greater than down move and positive
+            plus_dm = up_move if (up_move > down_move and up_move > 0) else Decimal('0')
+            # -DM: down move is greater than up move and positive
+            minus_dm = down_move if (down_move > up_move and down_move > 0) else Decimal('0')
+            
+            plus_dm_list.append(plus_dm)
+            minus_dm_list.append(minus_dm)
         
         if len(tr_list) < period:
             return None

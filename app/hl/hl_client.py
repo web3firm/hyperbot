@@ -47,9 +47,17 @@ class HyperLiquidClient:
         self.websocket = None
         
         self._meta_cache: Optional[Dict] = None
-        self._loop = asyncio.get_event_loop()
         
         logger.info(f"HyperLiquidClient initialized for {self.address[:10]}...")
+    
+    @property
+    def _loop(self):
+        """Get the running event loop lazily (Python 3.10+ compatible)."""
+        try:
+            return asyncio.get_running_loop()
+        except RuntimeError:
+            # Not in async context, fall back to get_event_loop
+            return asyncio.get_event_loop()
     
     # ==================== METADATA ====================
     @lru_cache(maxsize=1)
@@ -97,9 +105,16 @@ class HyperLiquidClient:
         return 3
     
     def round_price(self, symbol: str, price: float) -> float:
-        """Round price to valid tick size for the asset."""
+        """
+        Round price to valid tick size for the asset.
+        
+        Uses SDK-style rounding: 5 significant figures, then round to price decimals.
+        This is CRITICAL for TP/SL orders - HyperLiquid rejects incorrectly rounded prices!
+        """
         decimals = self.get_price_decimals(symbol)
-        return round(price, decimals)
+        # Step 1: Round to 5 significant figures (SDK style)
+        # Step 2: Round to asset's price decimal places
+        return round(float(f'{price:.5g}'), decimals)
     
     # ==================== DIRECT SDK PASSTHROUGH ====================
     # Exchange methods - use exchange.method() directly for:
@@ -141,7 +156,7 @@ class HyperLiquidClient:
         # Get current mid prices for mark price
         try:
             mids = self.info.all_mids()
-        except:
+        except Exception:
             mids = {}
         
         parsed = []

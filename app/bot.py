@@ -987,7 +987,7 @@ class HyperAIBot:
                         if self.telegram_bot:
                             try:
                                 await self.telegram_bot.notify_emergency("Kill switch activated! Trading stopped.")
-                            except:
+                            except Exception:
                                 pass
                         break
                     
@@ -1121,7 +1121,7 @@ class HyperAIBot:
                                         f"P&L: ${float(trade.pnl):.2f} ({float(trade.pnl_pct):+.2f}%)\n"
                                         f"Reason: {trade.exit_reason}"
                                     )
-                                except:
+                                except Exception:
                                     pass
                     
                     # Skip signal generation if paused
@@ -1192,7 +1192,7 @@ class HyperAIBot:
                         if self.telegram_bot:
                             try:
                                 await self.telegram_bot.notify_signal(signal)
-                            except:
+                            except Exception:
                                 pass  # Don't let Telegram errors stop trading
                         
                         # Validate with risk engine
@@ -1246,7 +1246,7 @@ class HyperAIBot:
                                                 f"Size: {signal['size']}\n"
                                                 f"SL: ${signal['stop_loss']:.4f} | TP: ${signal['take_profit']:.4f}"
                                             )
-                                        except:
+                                        except Exception:
                                             pass
                                 else:
                                     logger.warning(f"📝 [PAPER] Trade failed: {paper_result.get('error')}")
@@ -1296,7 +1296,7 @@ class HyperAIBot:
                                             signal['entry_price'],
                                             signal['size']
                                         )
-                                    except:
+                                    except Exception:
                                         pass
                                 
                                 # Log trade for AI training
