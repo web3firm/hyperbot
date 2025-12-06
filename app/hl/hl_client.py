@@ -198,6 +198,42 @@ class HyperLiquidClient:
         mids = self.info.all_mids()
         return float(mids.get(symbol, 0))
     
+    def get_funding_rate(self, symbol: str) -> Optional[float]:
+        """Get current funding rate for a symbol using SDK."""
+        try:
+            data = self.info.meta_and_asset_ctxs()
+            if data and len(data) >= 2:
+                meta = data[0]
+                asset_ctxs = data[1]
+                # Find symbol index
+                for i, asset in enumerate(meta.get('universe', [])):
+                    if asset.get('name') == symbol:
+                        if i < len(asset_ctxs):
+                            return float(asset_ctxs[i].get('funding', 0))
+        except Exception as e:
+            logger.warning(f"Failed to get funding rate for {symbol}: {e}")
+        return None
+    
+    def get_all_funding_rates(self) -> Dict[str, float]:
+        """Get funding rates for all assets using SDK."""
+        result = {}
+        try:
+            data = self.info.meta_and_asset_ctxs()
+            if data and len(data) >= 2:
+                meta = data[0]
+                asset_ctxs = data[1]
+                for i, asset in enumerate(meta.get('universe', [])):
+                    symbol = asset.get('name')
+                    if i < len(asset_ctxs):
+                        result[symbol] = float(asset_ctxs[i].get('funding', 0))
+        except Exception as e:
+            logger.warning(f"Failed to get funding rates: {e}")
+        return result
+    
+    async def async_get_funding_rate(self, symbol: str) -> Optional[float]:
+        """Async get current funding rate for a symbol."""
+        return await self._loop.run_in_executor(None, self.get_funding_rate, symbol)
+    
     async def get_market_price(self, symbol: str) -> float:
         """
         Async get current mid price for telegram bot compatibility.

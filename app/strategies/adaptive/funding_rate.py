@@ -62,7 +62,9 @@ class FundingRateFilter:
     
     async def get_funding_rate(self, symbol: str) -> Optional[Decimal]:
         """
-        Get current funding rate for a symbol.
+        Get current funding rate for a symbol using SDK method.
+        
+        Uses hl_client.get_funding_rate() which calls info.meta_and_asset_ctxs()
         
         Args:
             symbol: Trading symbol
@@ -78,25 +80,22 @@ class FundingRateFilter:
         
         try:
             if self.client:
-                # Get funding from HyperLiquid
-                meta = self.client.info.meta()
-                if meta and 'universe' in meta:
-                    for asset in meta['universe']:
-                        if asset.get('name') == symbol:
-                            funding = asset.get('funding', '0')
-                            rate = Decimal(str(funding))
-                            
-                            # Cache it
-                            self._cache[symbol] = (rate, datetime.now(timezone.utc))
-                            
-                            # Update history
-                            if symbol not in self.funding_history:
-                                self.funding_history[symbol] = []
-                            self.funding_history[symbol].append(float(rate))
-                            if len(self.funding_history[symbol]) > 100:
-                                self.funding_history[symbol].pop(0)
-                            
-                            return rate
+                # Use SDK method from hl_client
+                funding = self.client.get_funding_rate(symbol)
+                if funding is not None:
+                    rate = Decimal(str(funding))
+                    
+                    # Cache it
+                    self._cache[symbol] = (rate, datetime.now(timezone.utc))
+                    
+                    # Update history
+                    if symbol not in self.funding_history:
+                        self.funding_history[symbol] = []
+                    self.funding_history[symbol].append(float(rate))
+                    if len(self.funding_history[symbol]) > 100:
+                        self.funding_history[symbol].pop(0)
+                    
+                    return rate
         except Exception as e:
             logger.warning(f"Failed to get funding rate for {symbol}: {e}")
         
