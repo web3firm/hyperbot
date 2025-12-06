@@ -127,7 +127,12 @@ class KillSwitch:
         # 4. Check position losses
         for symbol, position in self.position_manager.open_positions.items():
             if position.unrealized_pnl < 0:
-                loss_pct = abs(position.unrealized_pnl / (position.size * position.entry_price) * 100)
+                # Guard against division by zero
+                position_value = position.size * position.entry_price
+                if position_value > 0:
+                    loss_pct = abs(position.unrealized_pnl / position_value * 100)
+                else:
+                    loss_pct = Decimal('0')
                 if loss_pct >= self.position_loss_trigger_pct:
                     self.trigger(
                         TriggerReason.POSITION_LOSS,

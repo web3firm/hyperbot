@@ -763,12 +763,26 @@ class HyperAIBot:
                         if self.kelly and symbol in self._position_details:
                             details = self._position_details[symbol]
                             realized_pnl = details.get('unrealized_pnl', 0)  # Now realized
+                            entry_price = details['entry_price']
+                            size = details['size']
+                            side = details['side']
+                            
+                            # Calculate exit_price from PnL: PnL = (exit - entry) * size for long
+                            # For long: exit = entry + PnL/size; For short: exit = entry - PnL/size
+                            if size > 0 and entry_price > 0:
+                                if side == 'long':
+                                    exit_price = entry_price + (realized_pnl / size)
+                                else:
+                                    exit_price = entry_price - (realized_pnl / size)
+                            else:
+                                exit_price = entry_price  # Fallback
+                            
                             self.kelly.add_trade(
                                 pnl=realized_pnl,
-                                entry_price=details['entry_price'],
-                                exit_price=details['entry_price'],  # Approximate
-                                size=details['size'],
-                                side=details['side']
+                                entry_price=entry_price,
+                                exit_price=exit_price,
+                                size=size,
+                                side=side
                             )
                             logger.info(f"📊 Kelly: Recorded trade {symbol} P&L: ${realized_pnl:+.2f}")
                             del self._position_details[symbol]
