@@ -845,22 +845,6 @@ class HyperAIBot:
                         (now - last_trail).total_seconds() >= self._trail_update_interval
                     )
                     
-                    # ==================== SCALPING MICRO-TRAIL ====================
-                    # For scalps (small TP targets like 0.3-0.5%), trail immediately
-                    # Activates at just 0.5% profit and trails at 0.08%
-                    
-                    if can_update_trail and unrealized_pnl_pct >= 0.5:
-                        # Use the order_manager's trailing stop function
-                        trail_result = self.order_manager.update_trailing_stop(
-                            symbol=symbol,
-                            current_price=float(current_price),
-                            trail_pct=0.08,  # 0.08% trailing distance
-                            min_update_pct=0.05  # Only update if SL moves > 0.05%
-                        )
-                        if trail_result:
-                            self._last_trail_update[symbol] = now
-                            logger.info(f"⚡ SCALP TRAIL: Moved SL closer at {unrealized_pnl_pct:.2f}% PnL")
-                    
                     # ==================== SWING TRAILING ====================
                     # **TRAILING STOP-LOSS + TAKE-PROFIT LOGIC** - Lock in profits dynamically!
                     # NOTE: With 5% SL / 15% TP PnL targets and 5x leverage:

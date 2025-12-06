@@ -127,7 +127,9 @@ class PositionManager:
         # Configuration
         self.auto_tpsl_enabled = self.config.get('auto_tpsl', True)
         self.health_check_enabled = self.config.get('health_check', True)
-        self.trailing_stop_enabled = self.config.get('trailing_stop', True)
+        # NOTE: Trailing stop disabled here - handled by bot.py with proper throttling
+        # Having it in both places causes duplicate orders!
+        self.trailing_stop_enabled = False  # self.config.get('trailing_stop', True)
         self.break_even_enabled = self.config.get('break_even', True)
         self.early_exit_enabled = self.config.get('early_exit', True)
         
