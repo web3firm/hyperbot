@@ -91,7 +91,11 @@ class KillSwitch:
         
         # 1. Check daily loss trigger
         if self.account_manager.session_pnl < 0:
-            daily_loss_pct = abs(self.account_manager.session_pnl / self.account_manager.session_start_equity * 100)
+            # Prevent division by zero if session_start_equity is 0
+            if self.account_manager.session_start_equity > 0:
+                daily_loss_pct = abs(self.account_manager.session_pnl / self.account_manager.session_start_equity * 100)
+            else:
+                daily_loss_pct = Decimal('0')
             if daily_loss_pct >= self.daily_loss_trigger_pct:
                 self.trigger(
                     TriggerReason.DAILY_LOSS,

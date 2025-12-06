@@ -235,8 +235,8 @@ class PositionManager:
                         if drawdown > managed.max_drawdown_pct:
                             managed.max_drawdown_pct = drawdown
             
-            # Remove closed positions
-            closed_symbols = set(self.positions.keys()) - {f"{s}_{p['side']}" for p in current_positions for s in [p['symbol']]}
+            # Remove closed positions - simplified comprehension
+            closed_symbols = set(self.positions.keys()) - {f"{p['symbol']}_{p['side']}" for p in current_positions}
             for pos_key in closed_symbols:
                 logger.info(f"📤 Position closed: {pos_key}")
                 del self.positions[pos_key]

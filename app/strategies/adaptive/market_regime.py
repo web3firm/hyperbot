@@ -226,29 +226,32 @@ class MarketRegimeDetector:
         return len(set(recent)) == 1
     
     def _calculate_adx(self, candles: List[Dict], period: int = 14) -> Optional[Decimal]:
-        """Calculate ADX from candles."""
+        """Calculate ADX from candles using proper True Range (H/L/C)."""
         if len(candles) < period * 2:
             return None
         
-        prices = [Decimal(str(c.get('close', c.get('c', 0)))) for c in candles]
-        
-        # Simplified ADX calculation
+        # Proper True Range calculation using High/Low/Close
         tr_list = []
         plus_dm_list = []
         minus_dm_list = []
         
-        for i in range(1, len(prices)):
-            current = prices[i]
-            previous = prices[i-1]
+        for i in range(1, len(candles)):
+            high = Decimal(str(candles[i].get('high', candles[i].get('h', 0))))
+            low = Decimal(str(candles[i].get('low', candles[i].get('l', 0))))
+            prev_high = Decimal(str(candles[i-1].get('high', candles[i-1].get('h', 0))))
+            prev_low = Decimal(str(candles[i-1].get('low', candles[i-1].get('l', 0))))
+            prev_close = Decimal(str(candles[i-1].get('close', candles[i-1].get('c', 0))))
             
-            tr = abs(current - previous)
+            # True Range = max(H-L, |H-prev_close|, |L-prev_close|)
+            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
             tr_list.append(tr)
             
-            up_move = current - previous if current > previous else Decimal('0')
-            down_move = previous - current if previous > current else Decimal('0')
+            # Directional Movement
+            up_move = high - prev_high
+            down_move = prev_low - low
             
-            plus_dm = up_move if up_move > down_move else Decimal('0')
-            minus_dm = down_move if down_move > up_move else Decimal('0')
+            plus_dm = up_move if (up_move > down_move and up_move > 0) else Decimal('0')
+            minus_dm = down_move if (down_move > up_move and down_move > 0) else Decimal('0')
             
             plus_dm_list.append(plus_dm)
             minus_dm_list.append(minus_dm)

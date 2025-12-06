@@ -112,7 +112,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(f'logs/bot_{datetime.now().strftime("%Y%m%d")}.log'),
+        logging.FileHandler(f'logs/bot_{datetime.now(timezone.utc).strftime("%Y%m%d")}.log'),
         logging.StreamHandler()
     ]
 )
@@ -140,6 +140,52 @@ def signal_handler(signum: int, frame: Optional[FrameType]) -> None:
 
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
+
+
+class AccountManagerProxy:
+    """
+    Dynamic proxy that always returns fresh values from the bot.
+    
+    Unlike static proxies that capture values at init time,
+    this proxy uses properties to fetch current values on each access.
+    This ensures risk_engine and kill_switch always see live data.
+    """
+    def __init__(self, bot: 'HyperAIBot'):
+        self._bot = bot
+    
+    @property
+    def current_equity(self):
+        return self._bot.account_value
+    
+    @property
+    def current_balance(self):
+        return self._bot.account_value
+    
+    @property
+    def peak_equity(self):
+        return self._bot.peak_equity
+    
+    @property
+    def session_start_equity(self):
+        return self._bot.session_start_equity
+    
+    @property
+    def session_pnl(self):
+        return self._bot.session_pnl
+    
+    @property
+    def margin_used(self):
+        return self._bot.margin_used
+
+
+class PositionManagerProxy:
+    """Dynamic proxy for position manager."""
+    def __init__(self, bot: 'HyperAIBot'):
+        self._bot = bot
+        self.open_positions = {}
+    
+    def get_position(self, symbol: str):
+        return None
 
 
 class HyperAIBot:
@@ -209,6 +255,10 @@ class HyperAIBot:
         
         # Telegram bot
         self.telegram_bot: Optional[TelegramBot] = None
+        
+        # Position tracking with thread-safe lock
+        self._position_details: Dict[str, Dict] = {}
+        self._position_lock = asyncio.Lock()
         
         # Candle cache for strategies (reduces API calls by 98%)
         self._candles_cache: List[Dict[str, Any]] = []
@@ -396,20 +446,9 @@ class HyperAIBot:
                 self.small_account_mode.apply_config()
             
             # Initialize risk management components
-            # Create simple AccountManager and PositionManager proxies
-            account_manager_proxy = type('obj', (object,), {
-                'current_equity': self.account_value,
-                'current_balance': self.account_value,
-                'peak_equity': self.peak_equity,
-                'session_start_equity': self.session_start_equity,
-                'session_pnl': self.session_pnl,
-                'margin_used': self.margin_used
-            })()
-            
-            position_manager_proxy = type('obj', (object,), {
-                'open_positions': {},
-                'get_position': lambda self, symbol: None  # type: ignore
-            })()
+            # Use dynamic proxies that always return fresh values
+            account_manager_proxy = AccountManagerProxy(self)
+            position_manager_proxy = PositionManagerProxy(self)
             
             risk_config = {
                 'max_position_size_pct': float(os.getenv('MAX_POSITION_SIZE_PCT', '55')),
@@ -586,16 +625,16 @@ class HyperAIBot:
                 message = None
                 
                 if status == 'filled':
-                    message = f"✅ **ORDER FILLED**\\n\\n{coin} {side.upper()} {size} @ ${price}"
+                    message = f"✅ **ORDER FILLED**\n\n{coin} {side.upper()} {size} @ ${price}"
                 elif status == 'triggered':
                     # Stop loss or take profit triggered
                     order_type = order.get('orderType', 'stop')
                     if 'tp' in order_type.lower():
-                        message = f"🎯 **TAKE PROFIT HIT**\\n\\n{coin} closed @ ${price}\\nProfit secured! 💰"
+                        message = f"🎯 **TAKE PROFIT HIT**\n\n{coin} closed @ ${price}\nProfit secured! 💰"
                     else:
-                        message = f"🛑 **STOP LOSS HIT**\\n\\n{coin} closed @ ${price}\\nLoss limited, capital protected."
+                        message = f"🛑 **STOP LOSS HIT**\n\n{coin} closed @ ${price}\nLoss limited, capital protected."
                 elif status == 'canceled':
-                    message = f"🚫 **ORDER CANCELLED**\\n\\n{coin} {side.upper()} {size} @ ${price}"
+                    message = f"🚫 **ORDER CANCELLED**\n\n{coin} {side.upper()} {size} @ ${price}"
                 
                 if message:
                     # Send async notification (don't block)
@@ -700,45 +739,43 @@ class HyperAIBot:
             positions = account_state.get('positions', [])
             current_symbols = {pos['symbol'] for pos in positions if float(pos.get('size', 0)) != 0}
             
-            # Build position details for tracking
-            if not hasattr(self, '_position_details'):
-                self._position_details = {}
-            
-            # Update position details for active positions
-            for pos in positions:
-                size = float(pos.get('size', 0))
-                if size != 0:
-                    symbol = pos['symbol']
-                    self._position_details[symbol] = {
-                        'entry_price': float(pos.get('entry_price', 0)),
-                        'size': abs(size),
-                        'side': 'long' if size > 0 else 'short',
-                        'unrealized_pnl': float(pos.get('unrealized_pnl', 0))
-                    }
-            
-            # Track symbols that closed since last check
-            if hasattr(self, '_last_positions'):
-                closed_positions = self._last_positions - current_symbols
-                for symbol in closed_positions:
-                    logger.info(f"🔄 Position closed: {symbol}")
-                    
-                    # Record trade to Kelly Criterion if we have details
-                    if self.kelly and symbol in self._position_details:
-                        details = self._position_details[symbol]
-                        realized_pnl = details.get('unrealized_pnl', 0)  # Now realized
-                        self.kelly.add_trade(
-                            pnl=realized_pnl,
-                            entry_price=details['entry_price'],
-                            exit_price=details['entry_price'],  # Approximate
-                            size=details['size'],
-                            side=details['side']
-                        )
-                        logger.info(f"📊 Kelly: Recorded trade {symbol} P&L: ${realized_pnl:+.2f}")
-                        del self._position_details[symbol]
-                    
-                    # Clean up backup targets
-                    if hasattr(self.order_manager, 'position_targets') and symbol in self.order_manager.position_targets:
-                        del self.order_manager.position_targets[symbol]
+            # Update position details with lock to prevent race conditions
+            async with self._position_lock:
+                # Update position details for active positions
+                for pos in positions:
+                    size = float(pos.get('size', 0))
+                    if size != 0:
+                        symbol = pos['symbol']
+                        self._position_details[symbol] = {
+                            'entry_price': float(pos.get('entry_price', 0)),
+                            'size': abs(size),
+                            'side': 'long' if size > 0 else 'short',
+                            'unrealized_pnl': float(pos.get('unrealized_pnl', 0))
+                        }
+                
+                # Track symbols that closed since last check
+                if hasattr(self, '_last_positions'):
+                    closed_positions = self._last_positions - current_symbols
+                    for symbol in closed_positions:
+                        logger.info(f"🔄 Position closed: {symbol}")
+                        
+                        # Record trade to Kelly Criterion if we have details
+                        if self.kelly and symbol in self._position_details:
+                            details = self._position_details[symbol]
+                            realized_pnl = details.get('unrealized_pnl', 0)  # Now realized
+                            self.kelly.add_trade(
+                                pnl=realized_pnl,
+                                entry_price=details['entry_price'],
+                                exit_price=details['entry_price'],  # Approximate
+                                size=details['size'],
+                                side=details['side']
+                            )
+                            logger.info(f"📊 Kelly: Recorded trade {symbol} P&L: ${realized_pnl:+.2f}")
+                            del self._position_details[symbol]
+                        
+                        # Clean up backup targets
+                        if hasattr(self.order_manager, 'position_targets') and symbol in self.order_manager.position_targets:
+                            del self.order_manager.position_targets[symbol]
             
             # Monitor each active position
             for pos in positions:
@@ -749,7 +786,11 @@ class HyperAIBot:
                 symbol = pos['symbol']
                 entry_price = Decimal(str(pos.get('entry_price', 0)))
                 unrealized_pnl = Decimal(str(pos.get('unrealized_pnl', 0)))
-                unrealized_pnl_pct = (unrealized_pnl / (abs(Decimal(str(size))) * entry_price)) * 100
+                # Prevent division by zero if entry_price=0
+                if entry_price > 0:
+                    unrealized_pnl_pct = (unrealized_pnl / (abs(Decimal(str(size))) * entry_price)) * 100
+                else:
+                    unrealized_pnl_pct = Decimal('0')
                 current_price = Decimal(str(pos.get('mark_price', entry_price)))  # Use mark price
                 
                 # Log position status every 60 loops (~1 min) for cleaner logs
@@ -994,12 +1035,8 @@ class HyperAIBot:
                     # Update account state every 10 loops
                     if loop_count % 10 == 0:
                         await self.update_account_state()
-                        
-                        # Update proxies
-                        if hasattr(self.risk_engine, 'account_manager'):
-                            self.risk_engine.account_manager.current_equity = self.account_value
-                            self.risk_engine.account_manager.session_pnl = self.session_pnl
-                            self.risk_engine.account_manager.peak_equity = self.peak_equity
+                        # Note: No manual proxy update needed - AccountManagerProxy uses @property
+                        # to always return fresh values from self.account_value, etc.
                     
                     # Check drawdown
                     self.drawdown_monitor.update()

@@ -169,8 +169,11 @@ class SmallAccountMode:
         max_margin = self.balance * Decimal('0.5')
         max_notional = max_margin * self.recommended_leverage
         
-        # Adjust based on signal quality
-        score_mult = Decimal(str(signal_score / max_score))
+        # Adjust based on signal quality (prevent divide by zero)
+        if max_score > 0:
+            score_mult = Decimal(str(signal_score / max_score))
+        else:
+            score_mult = Decimal('0.5')  # Default to 50% if no max_score
         if score_mult >= Decimal('0.8'):
             size_mult = Decimal('1.0')  # Full size for A+ setups
         elif score_mult >= Decimal('0.7'):

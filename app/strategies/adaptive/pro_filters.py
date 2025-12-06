@@ -429,8 +429,11 @@ class ProTradingFilters:
         elif htf_alignment < 0.7:
             multiplier *= 0.75
         
-        # Signal score adjustment
-        score_ratio = signal_score / max_score
+        # Signal score adjustment (prevent divide by zero)
+        if max_score > 0:
+            score_ratio = signal_score / max_score
+        else:
+            score_ratio = 0.5  # Default to 50% if no max_score
         if score_ratio >= 0.8:
             multiplier *= 1.0  # Full size for A+ setups
         elif score_ratio >= 0.7:
