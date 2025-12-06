@@ -1459,8 +1459,8 @@ class HyperAIBot:
                         liquidity_score=market_data.get('liquidity_score')
                     )
                     
-                    # Insert trade
-                    if result.get('executed'):
+                    # Insert trade (check 'success' key from order execution)
+                    if result.get('success'):
                         trade_id = await self.db.insert_trade(
                             symbol=signal.get('symbol', self.symbol),
                             signal_type=signal.get('signal', 'BUY'),
