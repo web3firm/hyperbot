@@ -1447,17 +1447,36 @@ class HyperAIBot:
                     for symbol, position in list(self.position_manager.positions.items()):
                         exit_reason = await self.position_manager.manage_position(position, candles)
                         
-                        if exit_reason and self.telegram_bot:
+                        if exit_reason:
+                            # ACTUALLY CLOSE THE POSITION!
+                            logger.warning(f"🚨 Early exit triggered for {symbol}: {exit_reason.value}")
                             try:
-                                await self.telegram_bot.notify_early_exit(
-                                    symbol=position.symbol,
-                                    side=position.side,
-                                    reason=exit_reason.value,
-                                    pnl=position.unrealized_pnl,
-                                    health=position.health_checks_failed
-                                )
+                                # Cancel existing orders first
+                                self.order_manager.cancel_all(symbol)
+                                
+                                # Close position with market order
+                                close_result = self.order_manager.market_close(symbol)
+                                if close_result.get('status') == 'ok':
+                                    logger.info(f"✅ {symbol} position closed via early exit")
+                                    # Remove from tracking
+                                    self.position_manager.remove_position(symbol)
+                                else:
+                                    logger.error(f"❌ Failed to close {symbol}: {close_result}")
                             except Exception as e:
-                                logger.debug(f"Failed to send early exit notification: {e}")
+                                logger.error(f"❌ Error closing {symbol} on early exit: {e}")
+                            
+                            # Send Telegram notification
+                            if self.telegram_bot:
+                                try:
+                                    await self.telegram_bot.notify_early_exit(
+                                        symbol=position.symbol,
+                                        side=position.side,
+                                        reason=exit_reason.value,
+                                        pnl=position.unrealized_pnl,
+                                        health=position.health_checks_failed
+                                    )
+                                except Exception as e:
+                                    logger.debug(f"Failed to send early exit notification: {e}")
                     
                     # Use interval from config
                     await asyncio.sleep(self.position_manager.config.get('check_interval_seconds', 5))

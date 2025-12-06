@@ -1951,18 +1951,19 @@ class TelegramBot:
     async def notify_early_exit(self, symbol: str, side: str, reason: str, pnl: float = None, health: int = None):
         """Send notification for early exit from position"""
         pnl_str = f"💰 PnL: ${pnl:+.2f}\n" if pnl is not None else ""
-        health_str = f"📊 Setup Health: {health}%\n" if health is not None else ""
+        health_str = f"📊 Health Failures: {health}\n" if health is not None else ""
         
+        # Use plain text to avoid Markdown parse errors
         message = (
-            f"⚡ *EARLY EXIT TRIGGERED*\n\n"
+            f"⚡ EARLY EXIT TRIGGERED\n\n"
             f"📊 {side.upper()} {symbol}\n"
             f"{health_str}"
             f"{pnl_str}"
             f"📝 Reason: {reason}\n\n"
-            f"🛡️ Capital protected before SL hit!"
+            f"🛡️ Position closed to protect capital!"
         )
         
-        await self.send_message(message)
+        await self.send_message(message, parse_mode=None)
     
     async def notify_manual_position_detected(self, symbol: str, side: str, size: float, entry_price: float):
         """Send notification when manual position is detected"""

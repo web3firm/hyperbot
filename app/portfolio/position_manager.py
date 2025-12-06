@@ -160,6 +160,12 @@ class PositionManager:
         """Get all currently managed positions"""
         return self.positions
     
+    def remove_position(self, symbol: str):
+        """Remove a position from tracking (after it's closed)"""
+        if symbol in self.positions:
+            del self.positions[symbol]
+            logger.info(f"🗑️ Removed {symbol} from position tracking")
+    
     async def scan_positions(self) -> List[ManagedPosition]:
         """
         Scan for all open positions and detect new/manual ones.
