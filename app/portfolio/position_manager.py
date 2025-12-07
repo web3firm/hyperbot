@@ -308,14 +308,26 @@ class PositionManager:
         Handles: restart after cancelling orders, orphaned positions, etc.
         """
         try:
+            # Throttle: Only check protection every 60 seconds per position
+            now = datetime.now(timezone.utc)
+            last_check = getattr(position, '_last_protection_check', None)
+            if last_check and (now - last_check).total_seconds() < 60:
+                return  # Already checked recently
+            position._last_protection_check = now
+            
             # Get actual open orders for this symbol
             if hasattr(self.client, 'get_frontend_open_orders'):
                 open_orders = self.client.get_frontend_open_orders(position.symbol)
             else:
                 open_orders = self.client.get_open_orders(position.symbol)
             
+            # Log for debugging
+            logger.debug(f"🔍 {position.symbol}: Found {len(open_orders)} orders")
+            
             # Check for existing TP/SL orders
             has_tp, has_sl = self._detect_tpsl_orders(open_orders, position.side)
+            
+            logger.debug(f"🔍 {position.symbol}: has_tp={has_tp}, has_sl={has_sl}")
             
             if has_tp and has_sl:
                 # Position is protected, mark as managed
@@ -324,8 +336,17 @@ class PositionManager:
                     logger.info(f"✅ {position.symbol} already has TP/SL protection")
                 return
             
-            # Missing protection! Set TP/SL
-            logger.warning(f"⚠️ {position.symbol} missing protection! TP={has_tp}, SL={has_sl}")
+            # Only set protection if BOTH are missing (prevent partial spam)
+            if has_tp or has_sl:
+                # Has one but not both - log but don't spam
+                logger.info(f"ℹ️ {position.symbol} has partial protection: TP={has_tp}, SL={has_sl}")
+                if has_sl:
+                    # Has SL, that's the important one - mark as protected
+                    position.managed_by_bot = True
+                return
+            
+            # Missing ALL protection! Set TP/SL
+            logger.warning(f"⚠️ {position.symbol} missing protection! Setting TP/SL...")
             await self._set_position_protection(position, has_tp=has_tp, has_sl=has_sl)
             
         except Exception as e:
@@ -337,36 +358,49 @@ class PositionManager:
         has_sl = False
         
         for o in orders:
-            # Method 1: Check isPositionTpsl flag (best method)
-            if o.get('isPositionTpsl', False) and o.get('isTrigger', False):
+            # Skip non-reduce-only orders (not TP/SL)
+            if not o.get('reduceOnly', False):
+                continue
+            
+            order_type = o.get('orderType', '')
+            order_type_str = order_type if isinstance(order_type, str) else ''
+            order_type_lower = order_type_str.lower()
+            
+            # Method 1: Check orderType string directly
+            # "Stop Market" = SL, "Take Profit Market" = TP
+            if 'take profit' in order_type_lower:
+                has_tp = True
+                continue
+            if 'stop' in order_type_lower:
+                has_sl = True
+                continue
+            
+            # Method 2: Check trigger condition for trigger orders
+            if o.get('isTrigger', False):
                 trigger_cond = o.get('triggerCondition', '')
                 order_side = o.get('side', '')  # 'A' = sell, 'B' = buy
                 
-                if position_side == 'long':
-                    if order_side == 'A' and trigger_cond == 'gt':
-                        has_tp = True
-                    elif order_side == 'A' and trigger_cond == 'lt':
+                # Parse trigger condition: "Price above X" or "Price below X"
+                if 'above' in trigger_cond.lower():
+                    # Price above = SL for SHORT, TP for LONG
+                    if position_side == 'short':
                         has_sl = True
-                else:
-                    if order_side == 'B' and trigger_cond == 'lt':
+                    else:
                         has_tp = True
-                    elif order_side == 'B' and trigger_cond == 'gt':
+                elif 'below' in trigger_cond.lower():
+                    # Price below = TP for SHORT, SL for LONG
+                    if position_side == 'short':
+                        has_tp = True
+                    else:
                         has_sl = True
             
-            # Method 2: Check orderType dict
-            order_type = o.get('orderType', '')
+            # Method 3: Check orderType dict (older format)
             if isinstance(order_type, dict):
                 trigger = order_type.get('trigger', {})
                 tpsl = trigger.get('tpsl', '')
                 if tpsl == 'tp':
                     has_tp = True
                 elif tpsl == 'sl':
-                    has_sl = True
-            elif isinstance(order_type, str):
-                order_type_lower = order_type.lower()
-                if 'tp' in order_type_lower or 'take profit' in order_type_lower:
-                    has_tp = True
-                elif 'sl' in order_type_lower or 'stop loss' in order_type_lower:
                     has_sl = True
         
         return has_tp, has_sl
