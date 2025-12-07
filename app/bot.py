@@ -92,8 +92,11 @@ from app.risk.small_account_mode import SmallAccountMode, get_small_account_mode
 # Import paper trading
 from app.execution.paper_trading import PaperTradingEngine, is_paper_trading_enabled, get_paper_trading_balance
 
-# Import Telegram bot
-from app.telegram_bot import TelegramBot
+# Import Telegram bot (V2 with modern UX)
+try:
+    from app.telegram.bot import TelegramBotV2 as TelegramBot
+except ImportError:
+    from app.telegram_bot import TelegramBot  # Fallback to legacy
 
 # Import error handler
 from app.utils.error_handler import ErrorHandler
