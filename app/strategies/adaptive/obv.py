@@ -40,7 +40,7 @@ class OBVResult:
     strength: float         # Trend strength (0-1)
 
 
-class OnBalanceVolume:
+class OBVCalculator:
     """
     On-Balance Volume (OBV) Indicator.
     

@@ -127,9 +127,9 @@ class SwingStrategy:
         # StochRSI: More sensitive than RSI for overbought/oversold extremes
         self.stoch_rsi = StochRSICalculator(
             rsi_period=int(os.getenv('STOCH_RSI_PERIOD', '14')),
-            stoch_period=int(os.getenv('STOCH_RSI_K', '3')),
-            smooth_k=int(os.getenv('STOCH_RSI_D', '3')),
-            smooth_d=3
+            stoch_period=14,  # Use same as RSI period
+            k_smooth=int(os.getenv('STOCH_RSI_K', '3')),
+            d_smooth=int(os.getenv('STOCH_RSI_D', '3'))
         )
         # OBV: Volume-price confirmation, detects accumulation/distribution
         self.obv_calculator = OBVCalculator()
@@ -749,28 +749,78 @@ class SwingStrategy:
         # More sensitive than regular RSI for detecting extreme conditions
         stoch_result = self.stoch_rsi.calculate(candles)
         if stoch_result:
-            stoch_direction, stoch_conf = self.stoch_rsi.get_signal(candles)
-            stoch_scoring = self.stoch_rsi.get_scoring(candles, direction)
-            stoch_score = stoch_scoring['score']
+            stoch_score = 0.0
+            stoch_reason = ""
+            
+            # Score based on zone and crossover alignment with direction
+            if direction == 'long':
+                if stoch_result.zone == 'oversold':
+                    stoch_score = 1.0
+                    stoch_reason = f"Oversold (K={stoch_result.k_line:.1f})"
+                    if stoch_result.crossover == 'bullish':
+                        stoch_score = 1.5
+                        stoch_reason += " + bullish crossover"
+                elif stoch_result.zone == 'overbought':
+                    stoch_score = -0.5
+                    stoch_reason = f"Overbought warning (K={stoch_result.k_line:.1f})"
+            else:  # short
+                if stoch_result.zone == 'overbought':
+                    stoch_score = 1.0
+                    stoch_reason = f"Overbought (K={stoch_result.k_line:.1f})"
+                    if stoch_result.crossover == 'bearish':
+                        stoch_score = 1.5
+                        stoch_reason += " + bearish crossover"
+                elif stoch_result.zone == 'oversold':
+                    stoch_score = -0.5
+                    stoch_reason = f"Oversold warning (K={stoch_result.k_line:.1f})"
             
             if stoch_score != 0:
                 score += stoch_score
                 details['stoch_rsi'] = {
                     'score': stoch_score,
-                    'k': stoch_result.k,
-                    'd': stoch_result.d,
+                    'k': stoch_result.k_line,
+                    'd': stoch_result.d_line,
                     'zone': stoch_result.zone,
                     'crossover': stoch_result.crossover,
-                    'reason': stoch_scoring['reason']
+                    'reason': stoch_reason
                 }
-                logger.debug(f"   StochRSI: {stoch_score:+.1f} (K={stoch_result.k:.1f}, zone={stoch_result.zone})")
+                logger.debug(f"   StochRSI: {stoch_score:+.1f} ({stoch_reason})")
         
         # ========== OBV - On Balance Volume (0-1.5 points, -1 for divergence) ==========
         # Volume-price confirmation from institutional trading
         obv_result = self.obv_calculator.calculate(candles)
         if obv_result:
-            obv_scoring = self.obv_calculator.get_scoring(candles, direction)
-            obv_score = obv_scoring['score']
+            obv_score = 0.0
+            obv_reason = ""
+            
+            # Divergence is a strong reversal signal
+            if obv_result.divergence == 'bullish' and direction == 'long':
+                obv_score = 1.5
+                obv_reason = "Bullish OBV divergence (accumulation)"
+            elif obv_result.divergence == 'bearish' and direction == 'short':
+                obv_score = 1.5
+                obv_reason = "Bearish OBV divergence (distribution)"
+            # Divergence against our direction is a warning
+            elif obv_result.divergence == 'bullish' and direction == 'short':
+                obv_score = -1.0
+                obv_reason = "⚠️ Bullish divergence vs short"
+            elif obv_result.divergence == 'bearish' and direction == 'long':
+                obv_score = -1.0
+                obv_reason = "⚠️ Bearish divergence vs long"
+            # Trend confirmation
+            elif direction == 'long' and obv_result.trend == 'rising':
+                obv_score = 1.0 if obv_result.strength > 0.5 else 0.5
+                obv_reason = f"OBV rising (strength={obv_result.strength:.1f})"
+            elif direction == 'short' and obv_result.trend == 'falling':
+                obv_score = 1.0 if obv_result.strength > 0.5 else 0.5
+                obv_reason = f"OBV falling (strength={obv_result.strength:.1f})"
+            # Against trend
+            elif direction == 'long' and obv_result.trend == 'falling':
+                obv_score = -0.5
+                obv_reason = "OBV falling vs long"
+            elif direction == 'short' and obv_result.trend == 'rising':
+                obv_score = -0.5
+                obv_reason = "OBV rising vs short"
             
             if obv_score != 0:
                 score += obv_score
@@ -779,12 +829,12 @@ class SwingStrategy:
                     'trend': obv_result.trend,
                     'strength': obv_result.strength,
                     'divergence': obv_result.divergence,
-                    'reason': obv_scoring['reason']
+                    'reason': obv_reason
                 }
                 if obv_score > 0:
-                    logger.debug(f"   OBV: {obv_score:+.1f} (trend={obv_result.trend}, {obv_scoring['reason']})")
+                    logger.debug(f"   OBV: {obv_score:+.1f} (trend={obv_result.trend}, {obv_reason})")
                 else:
-                    logger.debug(f"   OBV: {obv_score:+.1f} ⚠️ DIVERGENCE ({obv_scoring['reason']})")
+                    logger.debug(f"   OBV: {obv_score:+.1f} ⚠️ ({obv_reason})")
         
         # ========== CMF - Chaikin Money Flow (0-1.5 points) ==========
         # Institutional buying/selling pressure

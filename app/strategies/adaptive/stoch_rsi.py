@@ -42,7 +42,7 @@ class StochRSIResult:
     strength: float       # How deep into zone (0-1)
 
 
-class StochasticRSI:
+class StochRSICalculator:
     """
     Stochastic RSI Indicator.
     
