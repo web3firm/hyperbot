@@ -213,6 +213,8 @@ class TelegramBotV2:
             ("assets", self._cmd_assets),
             ("alerts", self._cmd_alerts),
             ("config", self._cmd_config),
+            ("signal", self._cmd_signal),
+            ("analyze", self._cmd_signal),  # Alias
         ]
         
         for cmd, handler in commands:
@@ -949,6 +951,246 @@ class TelegramBotV2:
             await self._edit_or_reply(
                 update,
                 self.fmt.format_error("Config Error", str(e)),
+                self.kb.back_to_menu()
+            )
+    
+    async def _cmd_signal(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        Handle /signal [symbol] command - Full market analysis on demand.
+        
+        Usage: /signal SOL or /signal BTC
+        Returns comprehensive analysis including:
+        - Current price and 24h change
+        - Technical indicators (RSI, MACD, EMAs, ADX, ATR)
+        - Market regime detection
+        - Signal score (long/short)
+        - Recommended entry, SL, TP levels
+        - Smart Money Concepts analysis
+        - Order flow bias
+        """
+        try:
+            # Get symbol from args or use default
+            if context.args:
+                symbol = context.args[0].upper()
+            else:
+                # Show usage
+                symbols = getattr(self.bot, 'trading_symbols', [self.bot.symbol])
+                await self._edit_or_reply(
+                    update,
+                    f"📊 *SIGNAL ANALYSIS*\n\n"
+                    f"Usage: `/signal SYMBOL`\n\n"
+                    f"Available: {', '.join(symbols)}\n\n"
+                    f"Example: `/signal SOL`",
+                    self.kb.back_to_menu()
+                )
+                return
+            
+            # Send "analyzing" message
+            msg = await update.effective_message.reply_text(
+                f"🔍 Analyzing *{symbol}*...\n\n_Fetching candles and running strategy..._",
+                parse_mode='Markdown'
+            )
+            
+            # Get the strategy for this symbol
+            strategy = None
+            if hasattr(self.bot, 'multi_asset_strategies') and symbol in self.bot.multi_asset_strategies:
+                strategy = self.bot.multi_asset_strategies[symbol]
+            elif hasattr(self.bot, 'strategy') and hasattr(self.bot.strategy, 'strategies'):
+                # Get first swing strategy
+                for name, strat in self.bot.strategy.strategies.items():
+                    if 'swing' in name.lower():
+                        strategy = strat
+                        break
+            
+            if not strategy:
+                await msg.edit_text(
+                    f"❌ No strategy found for {symbol}",
+                    parse_mode='Markdown'
+                )
+                return
+            
+            # Get market data from websocket
+            market_data = None
+            if hasattr(self.bot, 'websocket') and self.bot.websocket:
+                market_data = self.bot.websocket.get_market_data(symbol)
+            
+            if not market_data or not market_data.get('candles'):
+                await msg.edit_text(
+                    f"❌ No market data available for {symbol}\n\n"
+                    f"_Websocket may need time to collect candles._",
+                    parse_mode='Markdown'
+                )
+                return
+            
+            candles = market_data.get('candles', [])
+            current_price = market_data.get('price', 0)
+            
+            if len(candles) < 100:
+                await msg.edit_text(
+                    f"⏳ Need more data for {symbol}\n\n"
+                    f"Have {len(candles)} candles, need 100+",
+                    parse_mode='Markdown'
+                )
+                return
+            
+            # Calculate indicators
+            indicators = strategy._calculate_indicators(candles) if hasattr(strategy, '_calculate_indicators') else {}
+            
+            # Get regime
+            regime = "Unknown"
+            regime_confidence = 0
+            if hasattr(strategy, 'regime_detector'):
+                r, conf, params = strategy.regime_detector.detect_regime(
+                    candles,
+                    adx=indicators.get('adx'),
+                    atr=indicators.get('atr'),
+                    bb_bandwidth=indicators.get('bb_bandwidth'),
+                )
+                regime = r.value if hasattr(r, 'value') else str(r)
+                regime_confidence = conf
+            
+            # Calculate signal scores
+            long_score = 0
+            short_score = 0
+            if hasattr(strategy, '_calculate_signal_score'):
+                from decimal import Decimal
+                price = Decimal(str(current_price))
+                
+                # Get SMC analysis
+                smc = {}
+                if hasattr(strategy, 'smc_analyzer'):
+                    smc = strategy.smc_analyzer.analyze(candles) or {}
+                
+                # Get order flow
+                of = {}
+                if hasattr(strategy, 'order_flow'):
+                    of = strategy.order_flow.analyze_from_candles(candles) or {}
+                
+                long_score = strategy._calculate_signal_score(
+                    direction='long',
+                    indicators=indicators,
+                    regime=strategy.regime_detector.current_regime if hasattr(strategy, 'regime_detector') else None,
+                    regime_params={},
+                    smc_analysis=smc,
+                    of_analysis=of,
+                    current_price=price,
+                )
+                short_score = strategy._calculate_signal_score(
+                    direction='short',
+                    indicators=indicators,
+                    regime=strategy.regime_detector.current_regime if hasattr(strategy, 'regime_detector') else None,
+                    regime_params={},
+                    smc_analysis=smc,
+                    of_analysis=of,
+                    current_price=price,
+                )
+            
+            # Calculate TP/SL levels
+            atr = indicators.get('atr', 0)
+            if atr and current_price:
+                from decimal import Decimal
+                atr_val = Decimal(str(atr)) if not isinstance(atr, Decimal) else atr
+                price_val = Decimal(str(current_price))
+                
+                sl_mult = Decimal(os.getenv('ATR_SL_MULTIPLIER', '2.0'))
+                tp_mult = Decimal(os.getenv('ATR_TP_MULTIPLIER', '3.5'))
+                
+                long_sl = float(price_val - (atr_val * sl_mult))
+                long_tp = float(price_val + (atr_val * tp_mult))
+                short_sl = float(price_val + (atr_val * sl_mult))
+                short_tp = float(price_val - (atr_val * tp_mult))
+            else:
+                long_sl = long_tp = short_sl = short_tp = 0
+            
+            # Format regime emoji
+            regime_emoji = {
+                'TRENDING_UP': '🟢 TRENDING UP',
+                'TRENDING_DOWN': '🔴 TRENDING DOWN',
+                'RANGING': '◻️ RANGING',
+                'VOLATILE': '🌊 VOLATILE',
+                'BREAKOUT': '🚀 BREAKOUT',
+                'LOW_VOL': '💤 LOW VOL',
+                'UNKNOWN': '❓ UNKNOWN',
+            }.get(regime, f'❓ {regime}')
+            
+            # Determine signal recommendation
+            threshold = int(os.getenv('SIGNAL_THRESHOLD', '7'))
+            if long_score >= threshold and long_score > short_score:
+                signal_rec = f"🟢 *LONG* (Score: {long_score}/12)"
+                rec_entry = current_price
+                rec_sl = long_sl
+                rec_tp = long_tp
+            elif short_score >= threshold and short_score > long_score:
+                signal_rec = f"🔴 *SHORT* (Score: {short_score}/12)"
+                rec_entry = current_price
+                rec_sl = short_sl
+                rec_tp = short_tp
+            else:
+                signal_rec = f"⏸️ *NO SIGNAL* (L:{long_score} S:{short_score} need {threshold}+)"
+                rec_entry = rec_sl = rec_tp = 0
+            
+            # Build comprehensive message
+            lines = [
+                f"📊 *{symbol} ANALYSIS*",
+                "",
+                "═══════ PRICE ═══════",
+                f"💰 Current: ${float(current_price):,.4f}",
+                f"📈 ATR: ${float(atr):,.4f}" if atr else "",
+                "",
+                "═══════ REGIME ═══════",
+                f"{regime_emoji}",
+                f"Confidence: {regime_confidence*100:.0f}%" if regime_confidence else "",
+                "",
+                "═══════ INDICATORS ═══════",
+                f"📊 RSI: {float(indicators.get('rsi', 0)):.1f}" if indicators.get('rsi') else "",
+                f"📈 ADX: {float(indicators.get('adx', 0)):.1f}" if indicators.get('adx') else "",
+                f"📉 EMA9/21: ${float(indicators.get('ema_fast', 0)):,.2f} / ${float(indicators.get('ema_slow', 0)):,.2f}" if indicators.get('ema_fast') else "",
+            ]
+            
+            # Add MACD
+            macd = indicators.get('macd', {})
+            if macd:
+                macd_val = macd.get('macd', 0)
+                signal_val = macd.get('signal', 0)
+                hist = macd.get('histogram', 0)
+                if macd_val:
+                    lines.append(f"📊 MACD: {float(macd_val):.4f} (Sig: {float(signal_val):.4f})")
+            
+            lines.extend([
+                "",
+                "═══════ SIGNAL SCORES ═══════",
+                f"🟢 Long:  {long_score}/12 {'✅' if long_score >= threshold else ''}",
+                f"🔴 Short: {short_score}/12 {'✅' if short_score >= threshold else ''}",
+                "",
+                "═══════ RECOMMENDATION ═══════",
+                signal_rec,
+            ])
+            
+            if rec_entry:
+                lines.extend([
+                    "",
+                    "═══════ LEVELS ═══════",
+                    f"📍 Entry: ${rec_entry:,.4f}",
+                    f"🛑 SL: ${rec_sl:,.4f} ({abs((rec_sl-rec_entry)/rec_entry*100):.2f}%)",
+                    f"🎯 TP: ${rec_tp:,.4f} ({abs((rec_tp-rec_entry)/rec_entry*100):.2f}%)",
+                    f"📊 R:R: 1:{abs((rec_tp-rec_entry)/(rec_entry-rec_sl)):.1f}" if rec_sl != rec_entry else "",
+                ])
+            
+            lines.extend([
+                "",
+                f"_Analysis at {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}_",
+            ])
+            
+            await msg.edit_text(
+                "\n".join(filter(None, lines)),
+                parse_mode='Markdown'
+            )
+            
+        except Exception as e:
+            logger.error(f"Signal analysis error: {e}", exc_info=True)
+            await self._edit_or_reply(
+                update,
+                self.fmt.format_error("Signal Analysis Error", str(e)),
                 self.kb.back_to_menu()
             )
     
