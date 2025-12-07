@@ -94,7 +94,7 @@ from app.execution.paper_trading import PaperTradingEngine, is_paper_trading_ena
 
 # Import Telegram bot (V2 with modern UX)
 try:
-    from app.telegram.bot import TelegramBotV2 as TelegramBot
+    from app.tg_bot.bot import TelegramBotV2 as TelegramBot
 except ImportError:
     from app.telegram_bot import TelegramBot  # Fallback to legacy
 
