@@ -456,6 +456,21 @@ class HLOrderManager:
         
         logger.info(f"📍 set_tp_sl_sdk: {symbol} size={rounded_size} is_long={is_long} TP=${tp_price} SL=${sl_price}")
         
+        # CRITICAL: Cancel existing TP/SL orders first to prevent duplicates
+        try:
+            if tp_price and sl_price:
+                # Setting both - cancel all existing orders
+                self.cancel_all(symbol)
+                logger.info(f"   Cancelled all existing orders for {symbol}")
+            elif tp_price:
+                self._cancel_tp_only(symbol, is_long)
+                logger.info(f"   Cancelled existing TP orders for {symbol}")
+            elif sl_price:
+                self.cancel_sl_only(symbol, is_long)
+                logger.info(f"   Cancelled existing SL orders for {symbol}")
+        except Exception as e:
+            logger.warning(f"   Failed to cancel existing orders: {e}")
+        
         # Take Profit order
         if tp_price:
             try:
@@ -581,6 +596,20 @@ class HLOrderManager:
         """
         sz_decimals = self.client.get_sz_decimals(symbol)
         rounded_size = round(size, sz_decimals)
+        
+        results = []
+        
+        # CRITICAL: Cancel existing TP/SL orders first to prevent duplicates
+        try:
+            if tp_price and sl_price:
+                self.cancel_all(symbol)
+                logger.info(f"   Cancelled all existing orders for {symbol}")
+            elif tp_price:
+                self._cancel_tp_only(symbol, is_long)
+            elif sl_price:
+                self.cancel_sl_only(symbol, is_long)
+        except Exception as e:
+            logger.warning(f"   Failed to cancel existing orders: {e}")
         
         results = []
         

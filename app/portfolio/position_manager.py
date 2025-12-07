@@ -192,14 +192,19 @@ class PositionManager:
                 
                 if pos_key not in self.positions:
                     # New position detected!
+                    is_bot_position = pos_key in self.known_position_ids
+                    
                     managed = ManagedPosition(
                         symbol=symbol,
                         size=abs(pos['size']),
                         side=pos['side'],
                         entry_price=pos['entry_price'],
                         entry_time=datetime.now(timezone.utc),
-                        is_manual=pos_key not in self.known_position_ids,
+                        is_manual=not is_bot_position,  # True if NOT in known_position_ids
                         unrealized_pnl=pos.get('unrealized_pnl', 0),
+                        # CRITICAL: If bot created this position, it already set TP/SL
+                        # Don't set TP/SL again or we get duplicates!
+                        managed_by_bot=is_bot_position,
                     )
                     
                     # Calculate PnL percentage
