@@ -3,7 +3,7 @@ Keyboard Factory for Telegram Bot
 Creates consistent, reusable inline keyboards.
 """
 
-from typing import List, Optional, Dict, Any
+from typing import List, Dict, Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 

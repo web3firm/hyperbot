@@ -17,17 +17,13 @@ import os
 import asyncio
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone, timedelta
-from decimal import Decimal
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardMarkup
 from telegram.ext import (
     Application, 
     CommandHandler, 
     CallbackQueryHandler, 
     ContextTypes,
-    ConversationHandler,
-    MessageHandler,
-    filters,
 )
 from telegram.error import TelegramError
 
@@ -47,7 +43,7 @@ def mask_token(token: str) -> str:
     return f"{token[:10]}...{token[-4:]}"
 
 
-class TelegramBotV2:
+class TelegramBot:
     """
     Modern Telegram Bot with clean architecture.
     
@@ -166,7 +162,7 @@ class TelegramBotV2:
             # Send shutdown message
             try:
                 await self.send_message("🛑 *BOT SHUTTING DOWN*\n\nGoodbye!")
-            except:
+            except Exception:
                 pass
             
             # Stop application
@@ -673,7 +669,7 @@ class TelegramBotV2:
                     try:
                         with open(log_file, 'r', errors='ignore') as f:
                             lines = f.readlines()[-100:]
-                    except:
+                    except (IOError, OSError):
                         pass
                     break
             
@@ -686,7 +682,7 @@ class TelegramBotV2:
                     )
                     if result.stdout:
                         lines = result.stdout.strip().split('\n')
-                except:
+                except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError):
                     pass
             
             if not lines:
@@ -1497,7 +1493,7 @@ class TelegramBotV2:
                 try:
                     current = await self.bot.client.get_market_price(symbol)
                     pos['current_price'] = float(current)
-                except:
+                except Exception:
                     pos['current_price'] = pos.get('entry_price', 0)
             
             return positions

@@ -3,9 +3,8 @@ Rich Message Formatters for Telegram Bot
 Creates beautiful, consistent message layouts with Unicode art and clear formatting.
 """
 
-from decimal import Decimal
-from typing import Dict, Any, List, Optional
-from datetime import datetime, timezone, timedelta
+from typing import Dict, Any, List
+from datetime import datetime, timezone
 
 
 class MessageFormatter:
