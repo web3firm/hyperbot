@@ -23,7 +23,7 @@ import logging
 from decimal import Decimal
 from typing import Dict, Any, Optional, List, Tuple
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from app.strategies.adaptive.market_regime import MarketRegimeDetector, MarketRegime
 from app.strategies.adaptive.smart_money import SmartMoneyAnalyzer
@@ -109,6 +109,25 @@ class SwingStrategy:
         self.last_signal_time: Optional[datetime] = None
         self.signal_cooldown_seconds = int(os.getenv('SWING_COOLDOWN', '600'))  # 10 min between signals (was 5)
         self.recent_prices: deque = deque(maxlen=200)
+        
+        # ==================== WHIPSAW PROTECTION ====================
+        # Prevents rapid direction changes that destroy accounts
+        
+        # Signal confirmation - requires signal to persist across multiple scans
+        self.signal_confirmation_required = int(os.getenv('SIGNAL_CONFIRMATION_SCANS', '3'))  # Need 3 consecutive confirmations
+        self._pending_signal: Optional[Dict] = None  # Direction waiting for confirmation
+        self._confirmation_count = 0  # How many times we've seen this direction
+        self._last_confirmed_direction: Optional[str] = None  # Last direction we actually traded
+        
+        # Direction lock - prevent flipping too quickly after a signal
+        self.direction_lock_seconds = int(os.getenv('DIRECTION_LOCK_SECONDS', '900'))  # 15 min lock after signal
+        self._direction_lock_until: Optional[datetime] = None
+        self._locked_direction: Optional[str] = None
+        
+        # Score stability - track score history to detect erratic signals
+        self._score_history: deque = deque(maxlen=10)  # Last 10 scores per direction
+        self._long_score_history: deque = deque(maxlen=5)
+        self._short_score_history: deque = deque(maxlen=5)
         
         # Indicator cache
         self._indicator_cache = {}
@@ -236,6 +255,10 @@ class SwingStrategy:
         long_enhanced, long_details = self._calculate_enhanced_score('long', candles, indicators, long_score)
         short_enhanced, short_details = self._calculate_enhanced_score('short', candles, indicators, short_score)
         
+        # Track score history for stability analysis
+        self._long_score_history.append(long_enhanced)
+        self._short_score_history.append(short_enhanced)
+        
         # Log both scores for visibility
         logger.debug(f"📊 Scores: LONG={long_enhanced}/12 | SHORT={short_enhanced}/12 | Regime={regime.value}")
         
@@ -251,10 +274,32 @@ class SwingStrategy:
             score_details = short_details
             logger.info(f"✅ SHORT wins: {short_enhanced} vs LONG {long_enhanced}")
         else:
-            # No valid signal - log why
+            # No valid signal - reset confirmation
+            self._pending_signal = None
+            self._confirmation_count = 0
             if long_enhanced > 0 or short_enhanced > 0:
                 logger.debug(f"⏳ No signal: LONG={long_enhanced}/7, SHORT={short_enhanced}/7 (need 7+)")
             return None
+        
+        # ==================== WHIPSAW PROTECTION ====================
+        
+        # 1. Direction Lock Check - prevent rapid direction flips
+        now = datetime.now(timezone.utc)
+        if self._direction_lock_until and now < self._direction_lock_until:
+            if self._locked_direction and direction != self._locked_direction:
+                remaining = (self._direction_lock_until - now).total_seconds()
+                logger.debug(f"🔒 Direction locked to {self._locked_direction} for {remaining:.0f}s more - ignoring {direction}")
+                return None
+        
+        # 2. Score Stability Check - detect erratic signals
+        if not self._check_score_stability(direction, score):
+            logger.debug(f"📉 Score unstable for {direction} - waiting for consistency")
+            return None
+        
+        # 3. Signal Confirmation - require consistent signals across multiple scans
+        confirmed_signal = self._confirm_signal(direction, score, current_price)
+        if not confirmed_signal:
+            return None  # Still building confirmation
         
         # Check HTF alignment
         htf_aligned, htf_score, htf_reason = self.mtf_analyzer.should_take_trade(direction)
@@ -828,6 +873,125 @@ class SwingStrategy:
             logger.warning(f"⚠️ Trade execution issue for {signal.get('symbol', self.symbol)}: {result}")
         
         # Could add more tracking here (trade history, performance metrics, etc.)
+    
+    # ==================== WHIPSAW PROTECTION METHODS ====================
+    
+    def _confirm_signal(self, direction: str, score: float, current_price: Decimal) -> bool:
+        """
+        Require signals to persist across multiple scans before triggering.
+        This prevents acting on noise/whipsaw movements.
+        
+        Args:
+            direction: 'long' or 'short'
+            score: Current signal score
+            current_price: Current price
+            
+        Returns:
+            True if signal is confirmed, False if still building confirmation
+        """
+        now = datetime.now(timezone.utc)
+        
+        # Check if this is a new direction or continuation
+        if self._pending_signal is None or self._pending_signal.get('direction') != direction:
+            # New direction - start confirmation process
+            self._pending_signal = {
+                'direction': direction,
+                'first_seen': now,
+                'price_at_first': float(current_price),
+                'scores': [score],
+            }
+            self._confirmation_count = 1
+            logger.info(f"🔄 Signal confirmation started: {direction.upper()} (1/{self.signal_confirmation_required})")
+            return False
+        
+        # Same direction - increment confirmation
+        self._confirmation_count += 1
+        self._pending_signal['scores'].append(score)
+        
+        # Check if price moved too much during confirmation (invalidates signal)
+        first_price = Decimal(str(self._pending_signal['price_at_first']))
+        price_change_pct = abs(current_price - first_price) / first_price * 100
+        
+        if price_change_pct > Decimal('1.0'):  # More than 1% move during confirmation
+            logger.info(f"❌ Confirmation reset: price moved {price_change_pct:.2f}% during confirmation")
+            self._pending_signal = None
+            self._confirmation_count = 0
+            return False
+        
+        # Check if we have enough confirmations
+        if self._confirmation_count >= self.signal_confirmation_required:
+            # Check average score during confirmation
+            avg_score = sum(self._pending_signal['scores']) / len(self._pending_signal['scores'])
+            if avg_score < self.min_signal_score * 0.9:  # Must maintain 90% of threshold
+                logger.info(f"❌ Confirmation failed: avg score {avg_score:.1f} < {self.min_signal_score * 0.9:.1f}")
+                self._pending_signal = None
+                self._confirmation_count = 0
+                return False
+            
+            # Signal confirmed!
+            logger.info(f"✅ Signal CONFIRMED: {direction.upper()} after {self._confirmation_count} scans (avg score: {avg_score:.1f})")
+            
+            # Set direction lock to prevent rapid reversal
+            self._direction_lock_until = now + timedelta(seconds=self.direction_lock_seconds)
+            self._locked_direction = direction
+            self._last_confirmed_direction = direction
+            
+            # Reset confirmation state
+            self._pending_signal = None
+            self._confirmation_count = 0
+            
+            return True
+        
+        # Still building confirmation
+        logger.info(f"🔄 Signal confirmation building: {direction.upper()} ({self._confirmation_count}/{self.signal_confirmation_required})")
+        return False
+    
+    def _check_score_stability(self, direction: str, current_score: float) -> bool:
+        """
+        Check if scores are stable (not erratic).
+        Erratic signals often indicate choppy/ranging markets that whipsaw.
+        
+        Args:
+            direction: 'long' or 'short'
+            current_score: Current signal score
+            
+        Returns:
+            True if scores are stable, False if too erratic
+        """
+        # Get relevant history
+        history = self._long_score_history if direction == 'long' else self._short_score_history
+        
+        if len(history) < 3:
+            return True  # Not enough data, allow signal
+        
+        recent_scores = list(history)[-3:]
+        
+        # Check for large swings (volatility in scores = volatility in market)
+        score_range = max(recent_scores) - min(recent_scores)
+        if score_range > 4:  # More than 4 point swing in scores
+            logger.debug(f"⚠️ Score instability detected: range={score_range:.1f} in last 3 scans")
+            return False
+        
+        # Check if opposite direction was stronger recently
+        opposite_history = self._short_score_history if direction == 'long' else self._long_score_history
+        if len(opposite_history) >= 2:
+            opposite_recent = list(opposite_history)[-2:]
+            if max(opposite_recent) > current_score:
+                # Opposite direction was stronger very recently - whipsaw risk
+                logger.debug(f"⚠️ Whipsaw risk: opposite direction scored {max(opposite_recent):.1f} vs current {current_score:.1f}")
+                return False
+        
+        return True
+    
+    def reset_whipsaw_protection(self):
+        """Reset whipsaw protection state (call after position closes)."""
+        self._pending_signal = None
+        self._confirmation_count = 0
+        self._direction_lock_until = None
+        self._locked_direction = None
+        self._long_score_history.clear()
+        self._short_score_history.clear()
+        logger.debug("🔄 Whipsaw protection reset")
     
     def revalidate_signal(self, signal: Dict[str, Any], current_price: Decimal) -> bool:
         """
