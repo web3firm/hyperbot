@@ -35,6 +35,12 @@ from app.strategies.adaptive.pro_filters import ProTradingFilters
 from app.strategies.adaptive.vwap import VWAPCalculator
 from app.strategies.adaptive.divergence import DivergenceDetector
 from app.strategies.adaptive.funding_rate import FundingRateFilter
+from app.strategies.adaptive.supertrend import SupertrendIndicator, SupertrendDirection
+from app.strategies.adaptive.donchian import DonchianChannel, DonchianPosition
+# NEW: Professional momentum and volume indicators
+from app.strategies.adaptive.stoch_rsi import StochRSICalculator
+from app.strategies.adaptive.obv import OBVCalculator
+from app.strategies.adaptive.cmf import ChaikinMoneyFlow
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +110,33 @@ class SwingStrategy:
         self.vwap_calculator = VWAPCalculator()
         self.divergence_detector = DivergenceDetector()
         self.funding_filter = FundingRateFilter()
+        
+        # NEW: Trend-following indicators (from TradingView setup)
+        # Supertrend: Clear trend direction with built-in volatility adjustment
+        self.supertrend = SupertrendIndicator(
+            period=int(os.getenv('SUPERTREND_PERIOD', '10')),
+            multiplier=float(os.getenv('SUPERTREND_MULTIPLIER', '2.0'))
+        )
+        # Donchian Channel: Breakout detection and trend bias
+        self.donchian = DonchianChannel(
+            period=int(os.getenv('DONCHIAN_PERIOD', '50')),
+            offset=0
+        )
+        
+        # NEW: Professional momentum and volume indicators
+        # StochRSI: More sensitive than RSI for overbought/oversold extremes
+        self.stoch_rsi = StochRSICalculator(
+            rsi_period=int(os.getenv('STOCH_RSI_PERIOD', '14')),
+            stoch_period=int(os.getenv('STOCH_RSI_K', '3')),
+            smooth_k=int(os.getenv('STOCH_RSI_D', '3')),
+            smooth_d=3
+        )
+        # OBV: Volume-price confirmation, detects accumulation/distribution
+        self.obv_calculator = OBVCalculator()
+        # CMF: Chaikin Money Flow - institutional buying/selling pressure
+        self.cmf_calculator = ChaikinMoneyFlow(
+            period=int(os.getenv('CMF_PERIOD', '20'))
+        )
         
         # State tracking - BE PATIENT, DON'T OVERTRADE
         self.last_signal_time: Optional[datetime] = None
@@ -283,13 +316,20 @@ class SwingStrategy:
         
         # ==================== WHIPSAW PROTECTION ====================
         
-        # 1. Direction Lock Check - prevent rapid direction flips
+        # 1. Direction Lock Check - adaptive based on volatility
         now = datetime.now(timezone.utc)
         if self._direction_lock_until and now < self._direction_lock_until:
             if self._locked_direction and direction != self._locked_direction:
-                remaining = (self._direction_lock_until - now).total_seconds()
-                logger.debug(f"🔒 Direction locked to {self._locked_direction} for {remaining:.0f}s more - ignoring {direction}")
-                return None
+                # Check if we should override lock due to high volatility reversal
+                override_lock = self._should_override_direction_lock(
+                    direction, score, indicators, current_price
+                )
+                if not override_lock:
+                    remaining = (self._direction_lock_until - now).total_seconds()
+                    logger.debug(f"🔒 Direction locked to {self._locked_direction} for {remaining:.0f}s more - ignoring {direction}")
+                    return None
+                else:
+                    logger.info(f"⚡ Direction lock OVERRIDDEN due to high volatility reversal signal")
         
         # 2. Score Stability Check - detect erratic signals
         if not self._check_score_stability(direction, score):
@@ -297,7 +337,7 @@ class SwingStrategy:
             return None
         
         # 3. Signal Confirmation - require consistent signals across multiple scans
-        confirmed_signal = self._confirm_signal(direction, score, current_price)
+        confirmed_signal = self._confirm_signal(direction, score, current_price, indicators)
         if not confirmed_signal:
             return None  # Still building confirmation
         
@@ -560,12 +600,19 @@ class SwingStrategy:
         base_score: int,
     ) -> Tuple[int, Dict[str, Any]]:
         """
-        Calculate enhanced score with new pro-level features.
+        Calculate enhanced score with pro-level indicators.
         
-        Additional Scoring:
+        Scoring Layers:
+        - Supertrend alignment: 0-2 points (trend direction), -1.5 against
+        - Donchian position: 0-1.5 points (breakout/trend)
         - VWAP confluence: 0-1.5 points
-        - Divergence: 0-2 points
-        - Volume confirmation: 0-1 point
+        - Divergence (RSI/MACD): 0-2 points
+        - Volume confirmation: 0-1 point, -0.5 weak
+        - StochRSI: 0-1.5 points (sensitive overbought/oversold)
+        - OBV: 0-1.5 points, -1 for divergence
+        - CMF: 0-1.5 points (institutional money flow)
+        
+        Total max additional: ~13 points
         
         Args:
             direction: 'long' or 'short'
@@ -578,6 +625,92 @@ class SwingStrategy:
         """
         score = base_score
         details = {'base_score': base_score}
+        
+        # ========== SUPERTREND (0-2 points) ==========
+        # This is a key trend filter - trading against supertrend is risky
+        st_result = self.supertrend.calculate(candles)
+        if st_result:
+            st_aligned = (
+                (direction == 'long' and st_result.direction == SupertrendDirection.BULLISH) or
+                (direction == 'short' and st_result.direction == SupertrendDirection.BEARISH)
+            )
+            
+            if st_aligned:
+                # Aligned with supertrend - bonus points
+                st_score = 1.0
+                if st_result.changed:  # Fresh flip = extra confidence
+                    st_score += 0.5
+                if st_result.strength > 1.0:  # Strong trend
+                    st_score += 0.5
+                score += st_score
+                details['supertrend'] = {
+                    'aligned': True, 
+                    'direction': st_result.direction.value,
+                    'score': st_score,
+                    'strength': st_result.strength
+                }
+                logger.debug(f"   Supertrend: +{st_score:.1f} ({st_result.direction.value}, strength={st_result.strength:.1f}%)")
+            else:
+                # Against supertrend - penalty (this is a major warning!)
+                score -= 1.5
+                details['supertrend'] = {
+                    'aligned': False,
+                    'direction': st_result.direction.value,
+                    'score': -1.5,
+                    'warning': 'Trading against trend!'
+                }
+                logger.debug(f"   Supertrend: -1.5 (AGAINST {st_result.direction.value} trend!)")
+        
+        # ========== DONCHIAN CHANNEL (0-1.5 points) ==========
+        dc_result = self.donchian.calculate(candles)
+        if dc_result:
+            dc_score = 0.0
+            dc_reason = ""
+            
+            # Breakout signals are very strong
+            if dc_result.breakout == 'bullish' and direction == 'long':
+                dc_score = 1.5
+                dc_reason = "Bullish breakout!"
+            elif dc_result.breakout == 'bearish' and direction == 'short':
+                dc_score = 1.5
+                dc_reason = "Bearish breakdown!"
+            # Position-based scoring
+            elif direction == 'long':
+                if dc_result.position == DonchianPosition.UPPER_ZONE:
+                    dc_score = 0.5
+                    dc_reason = "Upper zone (bullish)"
+                elif dc_result.position == DonchianPosition.ABOVE_UPPER:
+                    dc_score = 1.0
+                    dc_reason = "Above upper band"
+                elif dc_result.position == DonchianPosition.LOWER_ZONE:
+                    dc_score = -0.5
+                    dc_reason = "Lower zone (bearish bias)"
+            else:  # short
+                if dc_result.position == DonchianPosition.LOWER_ZONE:
+                    dc_score = 0.5
+                    dc_reason = "Lower zone (bearish)"
+                elif dc_result.position == DonchianPosition.BELOW_LOWER:
+                    dc_score = 1.0
+                    dc_reason = "Below lower band"
+                elif dc_result.position == DonchianPosition.UPPER_ZONE:
+                    dc_score = -0.5
+                    dc_reason = "Upper zone (bullish bias)"
+            
+            # Squeeze detection - volatility expansion coming
+            if dc_result.squeeze:
+                dc_score += 0.5
+                dc_reason += " [SQUEEZE]"
+            
+            if dc_score != 0:
+                score += dc_score
+                details['donchian'] = {
+                    'score': dc_score,
+                    'position': dc_result.position.value,
+                    'reason': dc_reason,
+                    'squeeze': dc_result.squeeze,
+                    'width_pct': dc_result.width_pct
+                }
+                logger.debug(f"   Donchian: {dc_score:+.1f} ({dc_reason})")
         
         # ========== VWAP CONFLUENCE (0-1.5 points) ==========
         vwap_analysis = self.vwap_calculator.calculate_from_candles(candles)
@@ -611,6 +744,95 @@ class SwingStrategy:
             score -= 0.5
             details['volume'] = {'confirmed': False, 'ratio': volume_ratio}
             logger.debug(f"   Volume: -0.5 (weak: {volume_ratio:.1f}x)")
+        
+        # ========== STOCH RSI (0-1.5 points) ==========
+        # More sensitive than regular RSI for detecting extreme conditions
+        stoch_result = self.stoch_rsi.calculate(candles)
+        if stoch_result:
+            stoch_direction, stoch_conf = self.stoch_rsi.get_signal(candles)
+            stoch_scoring = self.stoch_rsi.get_scoring(candles, direction)
+            stoch_score = stoch_scoring['score']
+            
+            if stoch_score != 0:
+                score += stoch_score
+                details['stoch_rsi'] = {
+                    'score': stoch_score,
+                    'k': stoch_result.k,
+                    'd': stoch_result.d,
+                    'zone': stoch_result.zone,
+                    'crossover': stoch_result.crossover,
+                    'reason': stoch_scoring['reason']
+                }
+                logger.debug(f"   StochRSI: {stoch_score:+.1f} (K={stoch_result.k:.1f}, zone={stoch_result.zone})")
+        
+        # ========== OBV - On Balance Volume (0-1.5 points, -1 for divergence) ==========
+        # Volume-price confirmation from institutional trading
+        obv_result = self.obv_calculator.calculate(candles)
+        if obv_result:
+            obv_scoring = self.obv_calculator.get_scoring(candles, direction)
+            obv_score = obv_scoring['score']
+            
+            if obv_score != 0:
+                score += obv_score
+                details['obv'] = {
+                    'score': obv_score,
+                    'trend': obv_result.trend,
+                    'strength': obv_result.strength,
+                    'divergence': obv_result.divergence,
+                    'reason': obv_scoring['reason']
+                }
+                if obv_score > 0:
+                    logger.debug(f"   OBV: {obv_score:+.1f} (trend={obv_result.trend}, {obv_scoring['reason']})")
+                else:
+                    logger.debug(f"   OBV: {obv_score:+.1f} ⚠️ DIVERGENCE ({obv_scoring['reason']})")
+        
+        # ========== CMF - Chaikin Money Flow (0-1.5 points) ==========
+        # Institutional buying/selling pressure
+        cmf_result = self.cmf_calculator.calculate(candles)
+        if cmf_result:
+            cmf_score = 0.0
+            cmf_reason = ""
+            
+            # Divergence is a strong signal
+            if cmf_result.divergence == 'bullish' and direction == 'long':
+                cmf_score = 1.5
+                cmf_reason = "Bullish CMF divergence"
+            elif cmf_result.divergence == 'bearish' and direction == 'short':
+                cmf_score = 1.5
+                cmf_reason = "Bearish CMF divergence"
+            # Zone-based scoring
+            elif direction == 'long':
+                if cmf_result.zone == 'strong_buy':
+                    cmf_score = 1.0
+                    cmf_reason = f"Strong buying ({cmf_result.cmf:.2f})"
+                elif cmf_result.zone == 'buy':
+                    cmf_score = 0.5
+                    cmf_reason = f"Buying pressure ({cmf_result.cmf:.2f})"
+                elif cmf_result.zone in ['sell', 'strong_sell']:
+                    cmf_score = -0.5
+                    cmf_reason = f"Against money flow ({cmf_result.cmf:.2f})"
+            else:  # short
+                if cmf_result.zone == 'strong_sell':
+                    cmf_score = 1.0
+                    cmf_reason = f"Strong selling ({cmf_result.cmf:.2f})"
+                elif cmf_result.zone == 'sell':
+                    cmf_score = 0.5
+                    cmf_reason = f"Selling pressure ({cmf_result.cmf:.2f})"
+                elif cmf_result.zone in ['buy', 'strong_buy']:
+                    cmf_score = -0.5
+                    cmf_reason = f"Against money flow ({cmf_result.cmf:.2f})"
+            
+            if cmf_score != 0:
+                score += cmf_score
+                details['cmf'] = {
+                    'score': cmf_score,
+                    'cmf': cmf_result.cmf,
+                    'zone': cmf_result.zone,
+                    'trend': cmf_result.trend,
+                    'divergence': cmf_result.divergence,
+                    'reason': cmf_reason
+                }
+                logger.debug(f"   CMF: {cmf_score:+.1f} ({cmf_reason})")
         
         return int(score), details
     
@@ -876,20 +1098,122 @@ class SwingStrategy:
     
     # ==================== WHIPSAW PROTECTION METHODS ====================
     
-    def _confirm_signal(self, direction: str, score: float, current_price: Decimal) -> bool:
+    def _should_override_direction_lock(
+        self, 
+        direction: str, 
+        score: float, 
+        indicators: Dict,
+        current_price: Decimal
+    ) -> bool:
+        """
+        Check if direction lock should be overridden due to market conditions.
+        
+        Override conditions (more realistic):
+        1. High volatility (ATR > 2%)
+        2. Score meets threshold (7+) - not waiting for unicorn 9+
+        3. RSI in favorable zone
+        4. MACD confirms direction
+        
+        The idea: Lock is protection, but don't be stubborn when market clearly reversed.
+        
+        Args:
+            direction: New signal direction
+            score: New signal score
+            indicators: Current indicators
+            current_price: Current price
+            
+        Returns:
+            True if lock should be overridden
+        """
+        # Score must at least meet our normal threshold
+        if score < self.min_signal_score:
+            return False
+        
+        override_reasons = []
+        override_score = 0  # Need 3+ points to override
+        
+        # Check ATR for volatility (1 point)
+        atr = indicators.get('atr')
+        if atr:
+            atr_pct = float(atr) / float(current_price) * 100
+            if atr_pct >= 2.0:  # Elevated volatility
+                override_score += 1
+                override_reasons.append(f"ATR={atr_pct:.1f}%")
+            if atr_pct >= 3.0:  # High volatility - extra point
+                override_score += 1
+                override_reasons.append("HIGH_VOL")
+        
+        # Check RSI for extreme conditions (1-2 points)
+        rsi = indicators.get('rsi')
+        if rsi:
+            rsi_val = float(rsi)
+            if direction == 'long':
+                if rsi_val < 30:  # Very oversold
+                    override_score += 2
+                    override_reasons.append(f"RSI={rsi_val:.0f}(oversold)")
+                elif rsi_val < 40:  # Somewhat oversold
+                    override_score += 1
+                    override_reasons.append(f"RSI={rsi_val:.0f}")
+            else:  # short
+                if rsi_val > 70:  # Very overbought
+                    override_score += 2
+                    override_reasons.append(f"RSI={rsi_val:.0f}(overbought)")
+                elif rsi_val > 60:  # Somewhat overbought
+                    override_score += 1
+                    override_reasons.append(f"RSI={rsi_val:.0f}")
+        
+        # Check MACD direction (1 point)
+        macd = indicators.get('macd', {})
+        if macd:
+            histogram = macd.get('histogram', 0)
+            if histogram:
+                if direction == 'long' and histogram > 0:
+                    override_score += 1
+                    override_reasons.append("MACD+")
+                elif direction == 'short' and histogram < 0:
+                    override_score += 1
+                    override_reasons.append("MACD-")
+        
+        # Strong signal score bonus (1 point if score is 8+)
+        if score >= 8:
+            override_score += 1
+            override_reasons.append(f"Score={score}")
+        
+        # Need at least 3 points to override lock
+        if override_score >= 3:
+            logger.info(f"⚡ Lock override: {' | '.join(override_reasons)} (override_score={override_score})")
+            return True
+        
+        logger.debug(f"🔒 Lock maintained: override_score={override_score}/3 ({', '.join(override_reasons) or 'no signals'})")
+        return False
+    
+    def _confirm_signal(self, direction: str, score: float, current_price: Decimal, indicators: Dict = None) -> bool:
         """
         Require signals to persist across multiple scans before triggering.
         This prevents acting on noise/whipsaw movements.
+        
+        In high volatility (ATR 2x+), reduce confirmation requirement.
         
         Args:
             direction: 'long' or 'short'
             score: Current signal score
             current_price: Current price
+            indicators: Current indicators (for volatility check)
             
         Returns:
             True if signal is confirmed, False if still building confirmation
         """
         now = datetime.now(timezone.utc)
+        
+        # Adaptive confirmation based on volatility
+        confirmations_needed = self.signal_confirmation_required
+        if indicators:
+            atr = indicators.get('atr')
+            if atr and current_price > 0:
+                atr_pct = float(atr) / float(current_price) * 100
+                if atr_pct > 3.0:  # High volatility
+                    confirmations_needed = max(1, self.signal_confirmation_required - 1)
+                    logger.debug(f"⚡ High volatility ({atr_pct:.2f}%) - reduced confirmations to {confirmations_needed}")
         
         # Check if this is a new direction or continuation
         if self._pending_signal is None or self._pending_signal.get('direction') != direction:
@@ -901,7 +1225,7 @@ class SwingStrategy:
                 'scores': [score],
             }
             self._confirmation_count = 1
-            logger.info(f"🔄 Signal confirmation started: {direction.upper()} (1/{self.signal_confirmation_required})")
+            logger.info(f"🔄 Signal confirmation started: {direction.upper()} (1/{confirmations_needed})")
             return False
         
         # Same direction - increment confirmation
@@ -912,14 +1236,22 @@ class SwingStrategy:
         first_price = Decimal(str(self._pending_signal['price_at_first']))
         price_change_pct = abs(current_price - first_price) / first_price * 100
         
-        if price_change_pct > Decimal('1.0'):  # More than 1% move during confirmation
-            logger.info(f"❌ Confirmation reset: price moved {price_change_pct:.2f}% during confirmation")
+        # Adaptive price threshold based on volatility
+        max_price_move = Decimal('1.0')
+        if indicators:
+            atr = indicators.get('atr')
+            if atr and current_price > 0:
+                atr_pct = Decimal(str(float(atr) / float(current_price) * 100))
+                max_price_move = min(Decimal('2.0'), atr_pct)  # Allow up to ATR% move, max 2%
+        
+        if price_change_pct > max_price_move:
+            logger.info(f"❌ Confirmation reset: price moved {price_change_pct:.2f}% > {max_price_move:.2f}% during confirmation")
             self._pending_signal = None
             self._confirmation_count = 0
             return False
         
-        # Check if we have enough confirmations
-        if self._confirmation_count >= self.signal_confirmation_required:
+        # Check if we have enough confirmations (use adaptive count)
+        if self._confirmation_count >= confirmations_needed:
             # Check average score during confirmation
             avg_score = sum(self._pending_signal['scores']) / len(self._pending_signal['scores'])
             if avg_score < self.min_signal_score * 0.9:  # Must maintain 90% of threshold
@@ -931,8 +1263,18 @@ class SwingStrategy:
             # Signal confirmed!
             logger.info(f"✅ Signal CONFIRMED: {direction.upper()} after {self._confirmation_count} scans (avg score: {avg_score:.1f})")
             
-            # Set direction lock to prevent rapid reversal
-            self._direction_lock_until = now + timedelta(seconds=self.direction_lock_seconds)
+            # Set adaptive direction lock based on volatility
+            # High volatility = shorter lock (market moves fast)
+            lock_seconds = self.direction_lock_seconds
+            if indicators:
+                atr = indicators.get('atr')
+                if atr and current_price > 0:
+                    atr_pct = float(atr) / float(current_price) * 100
+                    if atr_pct > 3.0:  # High volatility
+                        lock_seconds = max(300, lock_seconds // 2)  # Reduce lock, min 5 min
+                        logger.debug(f"⚡ High volatility - reduced direction lock to {lock_seconds}s")
+            
+            self._direction_lock_until = now + timedelta(seconds=lock_seconds)
             self._locked_direction = direction
             self._last_confirmed_direction = direction
             
