@@ -69,14 +69,8 @@ class SwingStrategy:
         self.leverage = int(os.getenv('MAX_LEVERAGE', '5'))
         self.base_position_size = Decimal(os.getenv('POSITION_SIZE_PCT', '50'))
         
-        # PROFIT-FOCUSED: Larger targets for sustainable gains
-        # With 5x leverage:
-        #   - 1% price move = 5% PnL
-        #   - 2% price move = 10% PnL
-        #   - 3% price move = 15% PnL
-        self.target_price_move = Decimal(os.getenv('SWING_TARGET_PCT', '2.0'))  # 2% price = 10% PnL
-        self.stop_price_move = Decimal(os.getenv('SWING_STOP_PCT', '0.8'))     # 0.8% price = 4% loss
-        # R:R = 2.5:1 (winning trade makes 2.5x what losing trade costs)
+        # TP/SL is calculated dynamically by AdaptiveRiskManager using ATR
+        # See ATR_SL_MULTIPLIER and ATR_TP_MULTIPLIER in .env
         
         # Signal threshold - BE PATIENT, WAIT FOR A+ SETUPS
         self.min_signal_score = int(os.getenv('MIN_SIGNAL_SCORE', '7'))  # Raised to 7/10
