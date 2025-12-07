@@ -1,5 +1,5 @@
 """
-Modern Telegram Bot v2 for HyperBot
+Modern Telegram Bot for HyperBot
 Clean architecture with handlers, formatters, and keyboards.
 
 Features:
@@ -101,7 +101,7 @@ class TelegramBot:
         # Background tasks
         self._status_task: Optional[asyncio.Task] = None
         
-        logger.info(f"📱 Telegram Bot V2 initialized")
+        logger.info(f"📱 Telegram Bot initialized")
         logger.info(f"   Token: {mask_token(self.token)}")
         logger.info(f"   Chat ID: {self.chat_id}")
     
@@ -139,7 +139,7 @@ class TelegramBot:
             # Send startup message
             await self._send_startup_message()
             
-            logger.info("✅ Telegram Bot V2 started")
+            logger.info("✅ Telegram Bot started")
             
         except Exception as e:
             logger.error(f"Failed to start Telegram bot: {e}")
@@ -173,7 +173,7 @@ class TelegramBot:
                 await self.application.shutdown()
             
             self.is_running = False
-            logger.info("✅ Telegram Bot V2 stopped")
+            logger.info("✅ Telegram Bot stopped")
             
         except Exception as e:
             logger.error(f"Error stopping Telegram bot: {e}")
