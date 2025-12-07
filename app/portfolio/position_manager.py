@@ -16,7 +16,7 @@ import asyncio
 import json
 import logging
 from decimal import Decimal
-from typing import Dict, Any, Optional, List, Set
+from typing import Dict, Any, Optional, List, Set, Tuple
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field
 from enum import Enum
@@ -276,8 +276,10 @@ class PositionManager:
         """
         try:
             # 1. Set TP/SL if not protected
-            if self.auto_tpsl_enabled and not position.managed_by_bot:
-                await self._set_position_protection(position)
+            # CRITICAL: Always check for missing TP/SL, even for bot positions
+            # This handles: restart after cancelling orders, orphaned positions, etc.
+            if self.auto_tpsl_enabled:
+                await self._ensure_position_protection(position)
             
             # 2. Check break-even
             if self.break_even_enabled and not position.break_even_activated:
@@ -299,69 +301,80 @@ class PositionManager:
             logger.error(f"Error managing position {position.symbol}: {e}")
             return None
     
-    async def _set_position_protection(self, position: ManagedPosition):
-        """Set TP/SL on unprotected position"""
+    async def _ensure_position_protection(self, position: ManagedPosition):
+        """
+        Ensure position has TP/SL protection.
+        This checks ACTUAL orders, not just managed_by_bot flag.
+        Handles: restart after cancelling orders, orphaned positions, etc.
+        """
         try:
-            # Use frontend_open_orders for better TP/SL detection
-            # It returns isPositionTpsl and isTrigger flags
+            # Get actual open orders for this symbol
             if hasattr(self.client, 'get_frontend_open_orders'):
                 open_orders = self.client.get_frontend_open_orders(position.symbol)
             else:
                 open_orders = self.client.get_open_orders(position.symbol)
             
-            # Debug logging
-            logger.info(f"🔍 Checking orders for {position.symbol}: {len(open_orders)} orders found")
+            # Check for existing TP/SL orders
+            has_tp, has_sl = self._detect_tpsl_orders(open_orders, position.side)
             
-            # Check for TP/SL using multiple detection methods
-            has_tp = False
-            has_sl = False
+            if has_tp and has_sl:
+                # Position is protected, mark as managed
+                if not position.managed_by_bot:
+                    position.managed_by_bot = True
+                    logger.info(f"✅ {position.symbol} already has TP/SL protection")
+                return
             
-            for o in open_orders:
-                # Method 1: Check isPositionTpsl flag (best method)
-                if o.get('isPositionTpsl', False) and o.get('isTrigger', False):
-                    trigger_cond = o.get('triggerCondition', '')
-                    order_side = o.get('side', '')  # 'A' = sell, 'B' = buy
-                    
-                    # For LONG: TP is sell above (triggerCondition='gt'), SL is sell below (triggerCondition='lt')
-                    # For SHORT: TP is buy below (triggerCondition='lt'), SL is buy above (triggerCondition='gt')
-                    if position.side == 'long':
-                        if order_side == 'A' and trigger_cond == 'gt':  # Sell above = TP
-                            has_tp = True
-                        elif order_side == 'A' and trigger_cond == 'lt':  # Sell below = SL
-                            has_sl = True
-                    else:  # short
-                        if order_side == 'B' and trigger_cond == 'lt':  # Buy below = TP
-                            has_tp = True
-                        elif order_side == 'B' and trigger_cond == 'gt':  # Buy above = SL
-                            has_sl = True
+            # Missing protection! Set TP/SL
+            logger.warning(f"⚠️ {position.symbol} missing protection! TP={has_tp}, SL={has_sl}")
+            await self._set_position_protection(position, has_tp=has_tp, has_sl=has_sl)
+            
+        except Exception as e:
+            logger.error(f"Error ensuring protection for {position.symbol}: {e}")
+    
+    def _detect_tpsl_orders(self, orders: List[Dict], position_side: str) -> Tuple[bool, bool]:
+        """Detect if TP and SL orders exist for a position"""
+        has_tp = False
+        has_sl = False
+        
+        for o in orders:
+            # Method 1: Check isPositionTpsl flag (best method)
+            if o.get('isPositionTpsl', False) and o.get('isTrigger', False):
+                trigger_cond = o.get('triggerCondition', '')
+                order_side = o.get('side', '')  # 'A' = sell, 'B' = buy
                 
-                # Method 2: Check orderType dict (trigger format)
-                order_type = o.get('orderType', '')
-                if isinstance(order_type, dict):
-                    trigger = order_type.get('trigger', {})
-                    tpsl = trigger.get('tpsl', '')
-                    if tpsl == 'tp':
+                if position_side == 'long':
+                    if order_side == 'A' and trigger_cond == 'gt':
                         has_tp = True
-                    elif tpsl == 'sl':
+                    elif order_side == 'A' and trigger_cond == 'lt':
                         has_sl = True
-                elif isinstance(order_type, str):
-                    order_type_lower = order_type.lower()
-                    if 'tp' in order_type_lower or 'take profit' in order_type_lower:
+                else:
+                    if order_side == 'B' and trigger_cond == 'lt':
                         has_tp = True
-                    elif 'sl' in order_type_lower or 'stop loss' in order_type_lower:
-                        has_sl = True
-                
-                # Method 3: Check children orders (grouped orders)
-                children = o.get('children', [])
-                for child in children:
-                    child_type = child.get('orderType', '').lower() if isinstance(child.get('orderType'), str) else ''
-                    if 'tp' in child_type:
-                        has_tp = True
-                    elif 'sl' in child_type:
+                    elif order_side == 'B' and trigger_cond == 'gt':
                         has_sl = True
             
-            logger.info(f"   TP exists: {has_tp}, SL exists: {has_sl}")
-            
+            # Method 2: Check orderType dict
+            order_type = o.get('orderType', '')
+            if isinstance(order_type, dict):
+                trigger = order_type.get('trigger', {})
+                tpsl = trigger.get('tpsl', '')
+                if tpsl == 'tp':
+                    has_tp = True
+                elif tpsl == 'sl':
+                    has_sl = True
+            elif isinstance(order_type, str):
+                order_type_lower = order_type.lower()
+                if 'tp' in order_type_lower or 'take profit' in order_type_lower:
+                    has_tp = True
+                elif 'sl' in order_type_lower or 'stop loss' in order_type_lower:
+                    has_sl = True
+        
+        return has_tp, has_sl
+
+    async def _set_position_protection(self, position: ManagedPosition, has_tp: bool = False, has_sl: bool = False):
+        """Set TP/SL on unprotected position"""
+        try:
+            # If we already have both, nothing to do
             if has_tp and has_sl:
                 position.managed_by_bot = True
                 logger.info(f"✅ {position.symbol} already has TP/SL protection")
