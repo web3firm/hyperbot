@@ -286,6 +286,9 @@ class HyperAIBot:
         self._last_trail_update: Dict[str, datetime] = {}
         self._trail_update_interval = 30  # Minimum seconds between trail updates
         
+        # Track active trades for database closing
+        self._active_trade_ids: Dict[str, Dict] = {}  # symbol -> {trade_id, entry_price, quantity, side, entry_time}
+        
         # Error handler
         self.error_handler: Optional[ErrorHandler] = None
         
@@ -762,6 +765,45 @@ class HyperAIBot:
                     closed_positions = self._last_positions - current_symbols
                     for symbol in closed_positions:
                         logger.info(f"🔄 Position closed: {symbol}")
+                        
+                        # Close trade in database if we have a trade_id
+                        if self.db and symbol in self._active_trade_ids:
+                            trade_info = self._active_trade_ids[symbol]
+                            details = self._position_details.get(symbol, {})
+                            realized_pnl = details.get('unrealized_pnl', 0)  # Now realized
+                            entry_price = trade_info.get('entry_price', details.get('entry_price', 0))
+                            size = trade_info.get('quantity', details.get('size', 0))
+                            
+                            # Calculate exit price and PnL percent
+                            if size > 0 and entry_price > 0:
+                                side = trade_info.get('side', details.get('side', 'long'))
+                                if side.lower() in ('buy', 'long'):
+                                    exit_price = entry_price + (realized_pnl / size)
+                                else:
+                                    exit_price = entry_price - (realized_pnl / size)
+                                pnl_percent = (realized_pnl / (size * entry_price)) * 100
+                            else:
+                                exit_price = entry_price
+                                pnl_percent = 0
+                            
+                            # Calculate duration
+                            entry_time = trade_info.get('entry_time')
+                            duration_seconds = int((datetime.now(timezone.utc) - entry_time).total_seconds()) if entry_time else None
+                            
+                            try:
+                                await self.db.close_trade(
+                                    trade_id=trade_info['trade_id'],
+                                    exit_price=exit_price,
+                                    pnl=realized_pnl,
+                                    pnl_percent=pnl_percent,
+                                    commission=0.0,  # TODO: Calculate actual commission
+                                    duration_seconds=duration_seconds
+                                )
+                                logger.info(f"📊 DB: Trade #{trade_info['trade_id']} closed: P&L ${realized_pnl:+.2f} ({pnl_percent:+.2f}%)")
+                            except Exception as db_err:
+                                logger.error(f"❌ Failed to close trade in DB: {db_err}")
+                            finally:
+                                del self._active_trade_ids[symbol]
                         
                         # Record trade to Kelly Criterion if we have details
                         if self.kelly and symbol in self._position_details:
@@ -1329,7 +1371,7 @@ class HyperAIBot:
                                     except Exception:
                                         pass
                                 
-                                # Log trade for AI training
+                                # Log trade for AI training (also stores trade_id in _active_trade_ids)
                                 await self.log_trade_for_ai(signal, result, market_data)
                                 
                                 logger.info(f"✅ Trade #{self.trades_executed} executed")
@@ -1513,8 +1555,8 @@ class HyperAIBot:
                         trade_id = await self.db.insert_trade(
                             symbol=signal.get('symbol', self.symbol),
                             signal_type=signal.get('signal', 'BUY'),
-                            entry_price=float(result.get('entry_price', 0)),
-                            quantity=float(result.get('quantity', 0)),
+                            entry_price=float(result.get('entry_price', signal.get('entry_price', 0))),
+                            quantity=float(result.get('quantity', signal.get('size', 0))),
                             confidence_score=float(signal.get('confidence', 0)),
                             strategy_name=signal.get('strategy'),
                             account_equity=float(self.account_value),
@@ -1524,6 +1566,16 @@ class HyperAIBot:
                         
                         # Link signal to trade
                         await self.db.mark_signal_executed(signal_id, trade_id)
+                        
+                        # Store trade_id for closing later when position closes
+                        symbol = signal.get('symbol', self.symbol)
+                        self._active_trade_ids[symbol] = {
+                            'trade_id': trade_id,
+                            'entry_price': float(result.get('entry_price', signal.get('entry_price', 0))),
+                            'quantity': float(result.get('quantity', signal.get('size', 0))),
+                            'side': signal.get('side', signal.get('signal', 'buy')),
+                            'entry_time': datetime.now(timezone.utc)
+                        }
                         
                         logger.info(f"📊 Logged to database: signal_id={signal_id}, trade_id={trade_id}")
                     else:

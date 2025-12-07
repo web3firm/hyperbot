@@ -992,10 +992,28 @@ class HLOrderManager:
         
         # Convert to bot.py expected format
         success = result.get('status') == 'ok'
+        
+        # Get actual entry price from fill or use provided entry
+        actual_entry = entry_float
+        entry_data = result.get('entry', {})
+        statuses = entry_data.get('response', {}).get('data', {}).get('statuses', [])
+        if statuses and 'filled' in statuses[0]:
+            filled_info = statuses[0]['filled']
+            actual_entry = float(filled_info.get('avgPx', entry_float or 0))
+        
+        filled_size = result.get('filled_size', size_float)
+        
         return {
             'success': success,
             'result': result,
-            'error': result.get('error') if not success else None
+            'error': result.get('error') if not success else None,
+            # Add these for database logging
+            'entry_price': actual_entry,
+            'quantity': filled_size,
+            'symbol': symbol,
+            'side': side,
+            'tp_price': tp_float,
+            'sl_price': sl_float,
         }
     
     # ==================== LIMIT ORDERS ====================
