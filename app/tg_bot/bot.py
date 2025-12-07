@@ -650,6 +650,7 @@ class TelegramBotV2:
         """Handle /logs command."""
         try:
             from pathlib import Path
+            import subprocess
             
             log_date = datetime.now().strftime('%Y%m%d')
             
@@ -663,50 +664,97 @@ class TelegramBotV2:
             ]
             
             log_file = None
+            lines = []
+            
+            # Try to find log file
             for path in log_paths:
                 if path.exists():
                     log_file = path
+                    try:
+                        with open(log_file, 'r', errors='ignore') as f:
+                            lines = f.readlines()[-100:]
+                    except:
+                        pass
                     break
             
-            if not log_file:
-                # Show pm2 logs as fallback
+            # If no log file, try pm2 logs
+            if not lines:
+                try:
+                    result = subprocess.run(
+                        ['pm2', 'logs', 'hyperbot', '--lines', '30', '--nostream'],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    if result.stdout:
+                        lines = result.stdout.strip().split('\n')
+                except:
+                    pass
+            
+            if not lines:
                 message = (
                     "📝 *RECENT LOGS*\n\n"
-                    "📭 No log file found.\n\n"
-                    "_Use `pm2 logs hyperbot` on VPS to view logs._"
+                    "📭 No logs available.\n\n"
+                    "_Use `pm2 logs hyperbot` on VPS._"
                 )
                 await self._edit_or_reply(update, message, self.kb.back_to_menu())
                 return
             
-            with open(log_file, 'r') as f:
-                lines = f.readlines()[-50:]
-            
             formatted = []
-            for line in lines:
-                if ' - INFO - ' in line:
-                    emoji = "ℹ️"
-                elif ' - WARNING - ' in line:
-                    emoji = "⚠️"
-                elif ' - ERROR - ' in line:
-                    emoji = "❌"
-                elif 'Signal' in line or 'Trade' in line or 'Position' in line:
-                    emoji = "📊"
-                else:
+            for line in lines[-50:]:
+                line = line.strip()
+                if not line:
                     continue
                 
-                # Parse log line
-                parts = line.split(' - ', 3)
-                if len(parts) >= 4:
-                    time_parts = parts[0].split(' ')
-                    time = time_parts[1].split(',')[0] if len(time_parts) > 1 else parts[0][:8]
-                    msg = parts[3].strip()[:70]
-                    formatted.append(f"{emoji} `{time}` {msg}")
-                elif line.strip():
-                    # Just show raw line
-                    formatted.append(f"📋 {line.strip()[:70]}")
+                # Determine emoji based on content
+                if 'ERROR' in line or 'error' in line.lower():
+                    emoji = "❌"
+                elif 'WARNING' in line or 'warning' in line.lower():
+                    emoji = "⚠️"
+                elif 'Signal' in line or 'SIGNAL' in line:
+                    emoji = "📡"
+                elif 'Trade' in line or 'TRADE' in line or 'Order' in line:
+                    emoji = "💹"
+                elif 'Position' in line or 'POSITION' in line:
+                    emoji = "📊"
+                elif 'Candle' in line or 'candle' in line:
+                    emoji = "🕯️"
+                elif 'WebSocket' in line or 'websocket' in line:
+                    emoji = "🔌"
+                elif 'INFO' in line:
+                    emoji = "ℹ️"
+                else:
+                    emoji = "📋"
+                
+                # Extract time and message
+                # Handle PM2 format: "0|hyperbot  | 2025-12-07 13:40:17 +03:00: message"
+                if '|' in line and ':' in line:
+                    parts = line.split('|')
+                    if len(parts) >= 3:
+                        msg_part = '|'.join(parts[2:]).strip()
+                        # Extract time from PM2 format
+                        if msg_part.startswith('20'):
+                            time_end = msg_part.find(': ')
+                            if time_end > 0:
+                                time_str = msg_part[11:19]  # HH:MM:SS
+                                msg = msg_part[time_end+2:][:60]
+                                formatted.append(f"{emoji} `{time_str}` {msg}")
+                                continue
+                
+                # Handle standard format: "2025-12-07 13:40:17 - Module - LEVEL - message"
+                if ' - ' in line:
+                    parts = line.split(' - ')
+                    if len(parts) >= 4:
+                        time_parts = parts[0].split(' ')
+                        time_str = time_parts[1].split(',')[0] if len(time_parts) > 1 else parts[0][:8]
+                        msg = parts[-1].strip()[:60]
+                        formatted.append(f"{emoji} `{time_str}` {msg}")
+                        continue
+                
+                # Raw line fallback
+                if len(line) > 10:
+                    formatted.append(f"{emoji} {line[:65]}")
             
             if not formatted:
-                message = "📝 *RECENT LOGS*\n\n📭 No relevant log entries found."
+                message = "📝 *RECENT LOGS*\n\n📭 No log entries parsed."
             else:
                 message = "📝 *RECENT LOGS*\n\n" + "\n".join(formatted[-20:])
             
