@@ -212,6 +212,7 @@ class TelegramBotV2:
             ("regime", self._cmd_regime),
             ("assets", self._cmd_assets),
             ("alerts", self._cmd_alerts),
+            ("config", self._cmd_config),
         ]
         
         for cmd, handler in commands:
@@ -390,9 +391,52 @@ class TelegramBotV2:
     async def _cmd_market(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /market command."""
         try:
-            data = await self._get_market_data()
-            message = self.fmt.format_market_overview(data)
-            await self._edit_or_reply(update, message, self.kb.quick_actions())
+            lines = [
+                "📊 *MARKET OVERVIEW*",
+                "",
+            ]
+            
+            # Get symbols to show
+            if hasattr(self.bot, 'trading_symbols'):
+                symbols = self.bot.trading_symbols
+            else:
+                symbols = [getattr(self.bot, 'symbol', 'SOL')]
+            
+            for symbol in symbols:
+                try:
+                    # Get price from websocket or client
+                    price = None
+                    if hasattr(self.bot, 'websocket') and self.bot.websocket:
+                        market_data = self.bot.websocket.get_market_data(symbol)
+                        if market_data:
+                            price = market_data.get('price')
+                    
+                    if not price and hasattr(self.bot, 'client'):
+                        price = await self.bot.client.get_market_price(symbol)
+                    
+                    if price:
+                        lines.append(f"💰 *{symbol}*: ${float(price):,.2f}")
+                    else:
+                        lines.append(f"💰 *{symbol}*: Price unavailable")
+                except Exception as e:
+                    lines.append(f"💰 *{symbol}*: Error - {str(e)[:20]}")
+            
+            # Get regime
+            regime = "Unknown"
+            if hasattr(self.bot, 'strategy') and hasattr(self.bot.strategy, 'strategies'):
+                for name, strat in self.bot.strategy.strategies.items():
+                    if hasattr(strat, 'regime_detector'):
+                        r = strat.regime_detector.current_regime
+                        regime = r.value if hasattr(r, 'value') else str(r)
+                        break
+            
+            lines.extend([
+                "",
+                f"🌡️ Market Regime: {regime}",
+                f"🕐 Time: {datetime.now(timezone.utc).strftime('%H:%M UTC')}",
+            ])
+            
+            await self._edit_or_reply(update, "\n".join(lines), self.kb.quick_actions())
         except Exception as e:
             logger.error(f"Market error: {e}")
             await self._edit_or_reply(
@@ -575,7 +619,21 @@ class TelegramBotV2:
                 
                 lines.append(f"{side_emoji} *{symbol}* {source}")
                 lines.append(f"   Entry: ${pos.entry_price:.4f}")
-                lines.append(f"   SL: {'✅' if pos.sl_price else '⚠️'} TP: {'✅' if pos.tp_price else '⚠️'}")
+                lines.append(f"   Size:  {pos.size:.4f}")
+                
+                # Show SL/TP prices if set
+                sl_text = f"${pos.sl_price:.2f}" if pos.sl_price else "Not Set"
+                tp_text = f"${pos.tp_price:.2f}" if pos.tp_price else "Not Set"
+                sl_icon = "✅" if pos.sl_price else "⚠️"
+                tp_icon = "✅" if pos.tp_price else "⚠️"
+                
+                lines.append(f"   SL: {sl_icon} {sl_text}")
+                lines.append(f"   TP: {tp_icon} {tp_text}")
+                
+                # Show P&L if available
+                if hasattr(pos, 'unrealized_pnl_pct') and pos.unrealized_pnl_pct:
+                    pnl_emoji = "🟢" if pos.unrealized_pnl_pct > 0 else "🔴"
+                    lines.append(f"   P&L: {pnl_emoji} {pos.unrealized_pnl_pct:+.2f}%")
                 lines.append("")
             
             await self._edit_or_reply(update, "\n".join(lines), self.kb.back_to_menu())
@@ -592,12 +650,14 @@ class TelegramBotV2:
             from pathlib import Path
             
             log_date = datetime.now().strftime('%Y%m%d')
-            workspace = Path(__file__).parent.parent.parent
             
+            # Check multiple possible log locations
             log_paths = [
-                workspace / f"logs/bot_{log_date}.log",
-                workspace / "logs/bot.log",
+                Path(f"/root/hyperbot/logs/bot_{log_date}.log"),
+                Path("/root/hyperbot/logs/bot.log"),
                 Path(f"/home/hyperbot/logs/bot_{log_date}.log"),
+                Path(__file__).parent.parent.parent / f"logs/bot_{log_date}.log",
+                Path(__file__).parent.parent.parent / "logs/bot.log",
             ]
             
             log_file = None
@@ -607,11 +667,17 @@ class TelegramBotV2:
                     break
             
             if not log_file:
-                await self._edit_or_reply(update, "📭 No log file found", self.kb.back_to_menu())
+                # Show pm2 logs as fallback
+                message = (
+                    "📝 *RECENT LOGS*\n\n"
+                    "📭 No log file found.\n\n"
+                    "_Use `pm2 logs hyperbot` on VPS to view logs._"
+                )
+                await self._edit_or_reply(update, message, self.kb.back_to_menu())
                 return
             
             with open(log_file, 'r') as f:
-                lines = f.readlines()[-30:]
+                lines = f.readlines()[-50:]
             
             formatted = []
             for line in lines:
@@ -621,16 +687,27 @@ class TelegramBotV2:
                     emoji = "⚠️"
                 elif ' - ERROR - ' in line:
                     emoji = "❌"
+                elif 'Signal' in line or 'Trade' in line or 'Position' in line:
+                    emoji = "📊"
                 else:
                     continue
                 
+                # Parse log line
                 parts = line.split(' - ', 3)
                 if len(parts) >= 4:
-                    time = parts[0].split(' ')[1].split(',')[0]
-                    msg = parts[3].strip()[:80]
+                    time_parts = parts[0].split(' ')
+                    time = time_parts[1].split(',')[0] if len(time_parts) > 1 else parts[0][:8]
+                    msg = parts[3].strip()[:70]
                     formatted.append(f"{emoji} `{time}` {msg}")
+                elif line.strip():
+                    # Just show raw line
+                    formatted.append(f"📋 {line.strip()[:70]}")
             
-            message = "📝 *RECENT LOGS*\n\n" + "\n".join(formatted[-15:])
+            if not formatted:
+                message = "📝 *RECENT LOGS*\n\n📭 No relevant log entries found."
+            else:
+                message = "📝 *RECENT LOGS*\n\n" + "\n".join(formatted[-20:])
+            
             await self._edit_or_reply(update, message, self.kb.quick_actions())
         except Exception as e:
             await self._edit_or_reply(
@@ -648,18 +725,36 @@ class TelegramBotV2:
             
             stats = await self.bot.db.get_total_stats()
             
-            lines = [
-                "📊 *DATABASE STATISTICS*",
-                "",
-                f"Total Trades: {int(stats.get('total_trades', 0))}",
-                f"Wins: {int(stats.get('winning_trades', 0))}",
-                f"Losses: {int(stats.get('losing_trades', 0))}",
-                f"Win Rate: {self.fmt.format_percent(float(stats.get('win_rate', 0)))}",
-                "",
-                f"Total P&L: {self.fmt.format_money(float(stats.get('total_pnl', 0)), sign=True)}",
-                f"Best Trade: {self.fmt.format_money(float(stats.get('best_trade', 0)), sign=True)}",
-                f"Worst Trade: {self.fmt.format_money(float(stats.get('worst_trade', 0)), sign=True)}",
-            ]
+            # Handle None/empty stats safely
+            total_trades = stats.get('total_trades') or 0
+            winning = stats.get('winning_trades') or 0
+            losing = stats.get('losing_trades') or 0
+            win_rate = stats.get('win_rate') or 0
+            total_pnl = stats.get('total_pnl') or 0
+            best = stats.get('best_trade') or 0
+            worst = stats.get('worst_trade') or 0
+            
+            if total_trades == 0:
+                lines = [
+                    "📊 *DATABASE STATISTICS*",
+                    "",
+                    "📭 No closed trades recorded yet.",
+                    "",
+                    "_Trades will appear here once positions are closed._",
+                ]
+            else:
+                lines = [
+                    "📊 *DATABASE STATISTICS*",
+                    "",
+                    f"📈 Total Trades: {int(total_trades)}",
+                    f"✅ Wins: {int(winning)}",
+                    f"❌ Losses: {int(losing)}",
+                    f"📊 Win Rate: {self.fmt.format_percent(float(win_rate))}",
+                    "",
+                    f"💰 Total P&L: {self.fmt.format_money(float(total_pnl), sign=True)}",
+                    f"🏆 Best Trade: {self.fmt.format_money(float(best), sign=True)}",
+                    f"💔 Worst Trade: {self.fmt.format_money(float(worst), sign=True)}",
+                ]
             
             await self._edit_or_reply(update, "\n".join(lines), self.kb.back_to_menu())
         except Exception as e:
@@ -672,20 +767,36 @@ class TelegramBotV2:
     async def _cmd_kelly(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /kelly command."""
         try:
-            if not hasattr(self.bot, 'kelly_calculator'):
-                await self._edit_or_reply(update, "⚠️ Kelly Calculator not available", self.kb.back_to_menu())
+            kc = getattr(self.bot, 'kelly_calculator', None)
+            
+            if not kc:
+                lines = [
+                    "🎲 *KELLY CRITERION*",
+                    "",
+                    "⚠️ Kelly Calculator not initialized.",
+                    "",
+                    "_Requires 20+ closed trades in database._",
+                ]
+                await self._edit_or_reply(update, "\n".join(lines), self.kb.back_to_menu())
                 return
             
-            kc = self.bot.kelly_calculator
+            # Get Kelly stats
+            recommended = getattr(kc, 'recommended_size', 0) or 0
+            win_rate = getattr(kc, 'win_rate', 0) or 0
+            avg_win = getattr(kc, 'avg_win', 0) or 0
+            avg_loss = getattr(kc, 'avg_loss', 0) or 0
+            trade_count = getattr(kc, 'trade_count', 0) or 0
             
             lines = [
-                "📊 *KELLY CRITERION*",
+                "🎲 *KELLY CRITERION*",
                 "",
-                f"Recommended Size: {self.fmt.format_percent(kc.recommended_size * 100)}",
-                f"Win Rate: {self.fmt.format_percent(kc.win_rate * 100)}",
-                f"Avg Win: {self.fmt.format_money(kc.avg_win, sign=True)}",
-                f"Avg Loss: {self.fmt.format_money(kc.avg_loss)}",
-                f"Trades Analyzed: {kc.trade_count}",
+                f"🎯 Recommended Size: {self.fmt.format_percent(recommended * 100)}",
+                f"📈 Win Rate: {self.fmt.format_percent(win_rate * 100)}",
+                f"✅ Avg Win: {self.fmt.format_money(avg_win, sign=True)}",
+                f"❌ Avg Loss: {self.fmt.format_money(abs(avg_loss))}",
+                f"📊 Trades Analyzed: {trade_count}",
+                "",
+                f"_{('Active' if trade_count >= 20 else 'Need ' + str(20 - trade_count) + ' more trades')}_",
             ]
             
             await self._edit_or_reply(update, "\n".join(lines), self.kb.back_to_menu())
@@ -699,16 +810,52 @@ class TelegramBotV2:
     async def _cmd_regime(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /regime command."""
         try:
-            # Get regime from strategy
             regime = "Unknown"
+            confidence = 0
+            regimes_by_symbol = {}
+            
+            # Multi-asset mode: get regime for each symbol
+            if hasattr(self.bot, 'multi_asset_strategies'):
+                for symbol, strat in self.bot.multi_asset_strategies.items():
+                    if hasattr(strat, 'regime_detector'):
+                        r = strat.regime_detector.current_regime
+                        regimes_by_symbol[symbol] = r.value if hasattr(r, 'value') else str(r)
+            
+            # Single symbol mode
             if hasattr(self.bot, 'strategy') and hasattr(self.bot.strategy, 'strategies'):
                 for name, strat in self.bot.strategy.strategies.items():
                     if hasattr(strat, 'regime_detector'):
-                        regime = strat.regime_detector.current_regime.value
+                        r = strat.regime_detector.current_regime
+                        regime = r.value if hasattr(r, 'value') else str(r)
+                        confidence = getattr(strat.regime_detector, 'regime_confidence', 0) or 0
                         break
             
-            message = f"📊 *MARKET REGIME*\n\nCurrent: {regime}"
-            await self._edit_or_reply(update, message, self.kb.back_to_menu())
+            # Format regime with emoji
+            regime_emoji = {
+                'TRENDING_UP': '🟢 TRENDING UP',
+                'TRENDING_DOWN': '🔴 TRENDING DOWN',
+                'RANGING': '▫️ RANGING',
+                'VOLATILE': '🌊 VOLATILE',
+                'BREAKOUT': '🚀 BREAKOUT',
+                'LOW_VOL': '💤 LOW VOLATILITY',
+                'UNKNOWN': '❓ UNKNOWN',
+            }.get(regime, f'❓ {regime}')
+            
+            lines = [
+                "🌡️ *MARKET REGIME*",
+                "",
+                f"Current: {regime_emoji}",
+                f"Confidence: {self.fmt.format_percent(confidence * 100)}" if confidence else "",
+            ]
+            
+            # Show multi-asset regimes if available
+            if regimes_by_symbol:
+                lines.append("")
+                lines.append("🌐 *By Symbol:*")
+                for sym, reg in regimes_by_symbol.items():
+                    lines.append(f"  {sym}: {reg}")
+            
+            await self._edit_or_reply(update, "\n".join(filter(None, lines)), self.kb.back_to_menu())
         except Exception as e:
             await self._edit_or_reply(
                 update,
@@ -758,6 +905,52 @@ class TelegramBotV2:
                 self.notify_pnl_warnings
             )
         )
+    
+    async def _cmd_config(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /config command - show current configuration."""
+        try:
+            lines = [
+                "⚙️ *BOT CONFIGURATION*",
+                "",
+                "─────── Trading ───────",
+                f"Mode: {'Paper' if getattr(self.bot, 'is_paper_trading', False) else 'Live'}",
+                f"Network: {os.getenv('HYPERLIQUID_NETWORK', 'mainnet').upper()}",
+                f"Leverage: {os.getenv('MAX_LEVERAGE', '5')}x",
+                "",
+                "─────── Position Sizing ───────",
+                f"Position Size: {os.getenv('POSITION_SIZE_PCT', '25')}%",
+                f"Max Positions: {os.getenv('MAX_POSITIONS', '3')}",
+                "",
+                "─────── Risk Management ───────",
+                f"ATR SL Mult: {os.getenv('ATR_SL_MULTIPLIER', '2.0')}x",
+                f"ATR TP Mult: {os.getenv('ATR_TP_MULTIPLIER', '3.5')}x",
+                f"Max Drawdown: {os.getenv('MAX_DRAWDOWN_PCT', '15')}%",
+                "",
+                "─────── Assets ───────",
+            ]
+            
+            # Get trading symbols
+            if hasattr(self.bot, 'trading_symbols'):
+                symbols = self.bot.trading_symbols
+            else:
+                symbols = [getattr(self.bot, 'symbol', 'SOL')]
+            lines.append(f"Symbols: {', '.join(symbols)}")
+            
+            # Get strategy info
+            lines.extend([
+                "",
+                "─────── Strategy ───────",
+                f"Signal Threshold: {os.getenv('SIGNAL_THRESHOLD', '7')}/12",
+                f"Cooldown: {os.getenv('SIGNAL_COOLDOWN_SECONDS', '120')}s",
+            ])
+            
+            await self._edit_or_reply(update, "\n".join(lines), self.kb.back_to_menu())
+        except Exception as e:
+            await self._edit_or_reply(
+                update,
+                self.fmt.format_error("Config Error", str(e)),
+                self.kb.back_to_menu()
+            )
     
     # ==================== CALLBACK HANDLER ====================
     
