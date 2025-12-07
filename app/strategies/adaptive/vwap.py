@@ -216,8 +216,8 @@ class VWAPCalculator:
             if price >= self.upper_band:
                 return 0.9  # Good for shorts
         
-        # Decaying quality as distance increases
-        return max(0.0, float(1.0 - abs(distance_pct) / 2))
+        # Decaying quality as distance increases (use Decimal for subtraction)
+        return max(0.0, float(Decimal('1.0') - abs(distance_pct) / 2))
     
     def _is_at_band(self, price: Decimal) -> Optional[str]:
         """Check if price is at VWAP band."""
