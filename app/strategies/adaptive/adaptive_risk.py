@@ -102,6 +102,10 @@ class AdaptiveRiskManager:
         Returns:
             Dict with stop_loss, take_profit, position_size_pct
         """
+        # Ensure all inputs are Decimal to avoid type mismatches
+        entry_price = Decimal(str(entry_price)) if not isinstance(entry_price, Decimal) else entry_price
+        atr = Decimal(str(atr)) if not isinstance(atr, Decimal) else atr
+        
         # Base ATR-based distances
         sl_distance = atr * self.atr_sl_multiplier
         tp_distance = atr * self.atr_tp_multiplier

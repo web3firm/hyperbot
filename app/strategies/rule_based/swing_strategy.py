@@ -293,11 +293,17 @@ class SwingStrategy:
         
         # ==================== RISK CALCULATION ====================
         
-        atr = indicators['atr']
+        atr = indicators.get('atr')
+        if atr is None or atr <= 0:
+            logger.warning(f"⚠️ Invalid ATR for {self.symbol}, using fallback")
+            atr = current_price * Decimal('0.01')  # 1% of price as fallback
+        
+        # Ensure ATR is Decimal
+        atr = Decimal(str(atr)) if not isinstance(atr, Decimal) else atr
         
         # Get adaptive TP/SL levels
         risk_levels = self.risk_manager.calculate_adaptive_levels(
-            entry_price=current_price,
+            entry_price=Decimal(str(current_price)),
             direction=direction,
             atr=atr,
             regime_params=regime_params,
