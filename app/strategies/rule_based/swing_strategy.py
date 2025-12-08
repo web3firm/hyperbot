@@ -654,7 +654,9 @@ class SwingStrategy:
         # ========== REGIME ALIGNMENT CHECK (CRITICAL) ==========
         # Counter-trend trading is DANGEROUS - heavy penalty
         from app.strategies.adaptive.market_regime import MarketRegime
-        regime = self.regime_detector.detect_regime(candles)
+        regime_result = self.regime_detector.detect_regime(candles)
+        # detect_regime returns (regime_enum, confidence, params) tuple
+        regime = regime_result[0] if isinstance(regime_result, tuple) else regime_result
         
         if direction == 'long' and regime == MarketRegime.TRENDING_DOWN:
             score -= self.regime_penalty  # -5 points
