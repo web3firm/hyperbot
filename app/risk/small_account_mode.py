@@ -72,28 +72,28 @@ class SmallAccountMode:
             self.tier = 'micro'
             self.recommended_leverage = 15
             self.max_positions = 1
-            self.min_signal_score = 8  # Only A+ setups
+            self.min_signal_score = 20  # Only A+ setups (80%)
             self.target_pct = Decimal('3.0')  # Larger targets
             self.stop_pct = Decimal('1.2')  # Wider stops
         elif account_balance < 100:
             self.tier = 'small'
             self.recommended_leverage = 10
             self.max_positions = 1
-            self.min_signal_score = 7
+            self.min_signal_score = 18  # 72%
             self.target_pct = Decimal('2.5')
             self.stop_pct = Decimal('1.0')
         elif account_balance < 500:
             self.tier = 'starter'
             self.recommended_leverage = 7
             self.max_positions = 2
-            self.min_signal_score = 6
+            self.min_signal_score = 15  # 60%
             self.target_pct = Decimal('2.0')
             self.stop_pct = Decimal('0.8')
         else:
             self.tier = 'normal'
             self.recommended_leverage = 5
             self.max_positions = 3
-            self.min_signal_score = 6
+            self.min_signal_score = 15  # 60%
             self.target_pct = Decimal('2.0')
             self.stop_pct = Decimal('0.8')
         
@@ -101,7 +101,7 @@ class SmallAccountMode:
         logger.info(f"   Balance: ${account_balance:.2f}")
         logger.info(f"   Leverage: {self.recommended_leverage}x")
         logger.info(f"   Max Positions: {self.max_positions}")
-        logger.info(f"   Min Signal Score: {self.min_signal_score}/10")
+        logger.info(f"   Min Signal Score: {self.min_signal_score}/25")
         logger.info(f"   Target: {self.target_pct}% | Stop: {self.stop_pct}%")
     
     def get_tradeable_assets(self) -> List[str]:
@@ -254,7 +254,7 @@ class SmallAccountMode:
             f"Balance: ${float(self.balance):.2f}\n"
             f"Leverage: {self.recommended_leverage}x\n"
             f"Max Positions: {self.max_positions}\n"
-            f"Min Signal Score: {self.min_signal_score}/10\n\n"
+            f"Min Signal Score: {self.min_signal_score}/25\n\n"
             f"**Risk Management:**\n"
             f"Risk per Trade: ${float(risk_usd):.2f} ({float(risk_pct)}%)\n"
             f"Target: {self.target_pct}% price move\n"
