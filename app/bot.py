@@ -1243,6 +1243,21 @@ class HyperAIBot:
                         signal = await self.strategy.generate_signal(market_data, account_state)
                     
                     if signal:
+                        # ==================== RECOVERY MODE CHECK ====================
+                        # Reduce position sizes after drawdown to limit further losses
+                        if self.drawdown_monitor:
+                            trading_allowed, dd_reason = self.drawdown_monitor.is_trading_allowed()
+                            if not trading_allowed:
+                                logger.warning(f"⛔ Signal rejected: {dd_reason}")
+                                await asyncio.sleep(5)
+                                continue
+                            
+                            recovery_multiplier = self.drawdown_monitor.get_recovery_mode_multiplier()
+                            if recovery_multiplier < 1.0:
+                                original_size = signal['size']
+                                signal['size'] = float(Decimal(str(original_size)) * Decimal(str(recovery_multiplier)))
+                                logger.info(f"🔄 Recovery mode: size {original_size:.4f} → {signal['size']:.4f} ({recovery_multiplier:.0%})")
+                        
                         # Apply Kelly Criterion position sizing adjustment
                         if self.kelly:
                             kelly_result = self.kelly.calculate()

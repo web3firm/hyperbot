@@ -11,10 +11,14 @@ from decimal import Decimal
 from hyperliquid.exchange import Exchange
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
+from hyperliquid.utils.error import ServerError
 from eth_account import Account
 from app.utils.trading_logger import TradingLogger
 
 logger = TradingLogger("hl_client")
+
+# Transient HTTP errors that should be retried
+RETRYABLE_STATUS_CODES = {502, 503, 504, 520, 521, 522, 523, 524}
 
 
 class HyperLiquidClient:
@@ -59,6 +63,42 @@ class HyperLiquidClient:
             # Not in async context, fall back to get_event_loop
             return asyncio.get_event_loop()
     
+    async def _retry_on_server_error(self, func, *args, max_retries: int = 3, delay: float = 2.0):
+        """
+        Retry a function on transient server errors (502, 503, 504, etc).
+        
+        Args:
+            func: Sync function to call
+            *args: Arguments to pass to func
+            max_retries: Maximum retry attempts
+            delay: Delay between retries (doubles each retry)
+            
+        Returns:
+            Function result
+            
+        Raises:
+            Last exception if all retries fail
+        """
+        last_error = None
+        for attempt in range(max_retries + 1):
+            try:
+                return await self._loop.run_in_executor(None, func, *args)
+            except ServerError as e:
+                status_code = e.args[0] if e.args else 0
+                if status_code in RETRYABLE_STATUS_CODES:
+                    last_error = e
+                    if attempt < max_retries:
+                        wait_time = delay * (2 ** attempt)
+                        logger.warning(f"⚠️ Server error {status_code}, retrying in {wait_time:.1f}s... ({attempt + 1}/{max_retries})")
+                        await asyncio.sleep(wait_time)
+                        continue
+                raise  # Non-retryable error
+            except Exception as e:
+                raise  # Non-server errors
+        
+        # All retries exhausted
+        raise last_error
+
     # ==================== METADATA ====================
     @lru_cache(maxsize=1)
     def get_meta(self) -> Dict:
@@ -239,7 +279,7 @@ class HyperLiquidClient:
         Async get current mid price for telegram bot compatibility.
         Returns the mid price (average of best bid/ask).
         """
-        mids = await self._loop.run_in_executor(None, self.info.all_mids)
+        mids = await self._retry_on_server_error(self.info.all_mids)
         return float(mids.get(symbol, 0))
     
     def get_open_orders(self, symbol: Optional[str] = None) -> List[Dict]:
@@ -324,18 +364,18 @@ class HyperLiquidClient:
             logger.error(f"Failed to fetch candles for {symbol}: {e}")
             return []
     
-    # ==================== ASYNC WRAPPERS ====================
+    # ==================== ASYNC WRAPPERS (with retry on server errors) ====================
     async def async_user_state(self) -> Dict:
-        return await self._loop.run_in_executor(None, self.info.user_state, self.address)
+        return await self._retry_on_server_error(self.info.user_state, self.address)
     
     async def async_all_mids(self) -> Dict:
-        return await self._loop.run_in_executor(None, self.info.all_mids)
+        return await self._retry_on_server_error(self.info.all_mids)
     
     async def async_open_orders(self) -> List[Dict]:
-        return await self._loop.run_in_executor(None, self.info.open_orders, self.address)
+        return await self._retry_on_server_error(self.info.open_orders, self.address)
     
     async def async_l2_snapshot(self, symbol: str) -> Dict:
-        return await self._loop.run_in_executor(None, self.info.l2_snapshot, symbol)
+        return await self._retry_on_server_error(self.info.l2_snapshot, symbol)
     
     async def get_account_state(self) -> Dict[str, Any]:
         """
@@ -348,8 +388,8 @@ class HyperLiquidClient:
             if cached:
                 return cached
         
-        # Fallback to API
-        state = await self._loop.run_in_executor(None, self.info.user_state, self.address)
+        # Fallback to API with retry on transient errors
+        state = await self._retry_on_server_error(self.info.user_state, self.address)
         margin = state.get("marginSummary", {})
         
         # Parse positions with all fields needed by telegram_bot.py

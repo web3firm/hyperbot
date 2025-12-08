@@ -4,7 +4,7 @@ Tracks peak equity and current drawdown with multiple alert levels
 """
 
 import logging
-from typing import Dict, Any, Optional, Callable
+from typing import Dict, Any, Optional, Callable, Tuple
 from decimal import Decimal
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
@@ -273,3 +273,48 @@ class DrawdownMonitor:
             'auto_pause_enabled': self.auto_pause_enabled,
             'auto_pause_threshold_pct': float(self.auto_pause_threshold_pct)
         }
+    
+    def get_recovery_mode_multiplier(self) -> float:
+        """
+        Get position size multiplier based on drawdown recovery mode.
+        
+        Recovery mode reduces position sizes after drawdown to:
+        1. Limit further losses
+        2. Allow gradual recovery with reduced risk
+        3. Prevent emotional revenge trading
+        
+        Returns:
+            Multiplier (0.0 to 1.0) to apply to position sizes
+            - NORMAL: 1.0 (100% of normal size)
+            - WARNING: 0.7 (70% - moderate reduction)
+            - CRITICAL: 0.4 (40% - significant reduction)
+            - EMERGENCY: 0.0 (0% - no trading)
+        """
+        multipliers = {
+            DrawdownLevel.NORMAL: 1.0,
+            DrawdownLevel.WARNING: 0.7,
+            DrawdownLevel.CRITICAL: 0.4,
+            DrawdownLevel.EMERGENCY: 0.0,
+        }
+        
+        multiplier = multipliers.get(self.current_level, 1.0)
+        
+        if multiplier < 1.0:
+            logger.info(f"🔄 Recovery Mode: {self.current_level.value} - position size at {multiplier*100:.0f}%")
+        
+        return multiplier
+    
+    def is_trading_allowed(self) -> Tuple[bool, str]:
+        """
+        Check if trading is allowed based on drawdown status.
+        
+        Returns:
+            (allowed, reason)
+        """
+        if self.is_paused:
+            return False, f"Trading paused: {self.pause_reason}"
+        
+        if self.current_level == DrawdownLevel.EMERGENCY:
+            return False, f"Emergency drawdown level - trading suspended"
+        
+        return True, "OK"

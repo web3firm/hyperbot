@@ -333,6 +333,35 @@ class SwingStrategy:
                 logger.debug(f"⏳ No signal: LONG={long_enhanced}/{self.min_signal_score}, SHORT={short_enhanced}/{self.min_signal_score} (need {self.min_signal_score}+)")
             return None
         
+        # ==================== CRITICAL: HARD COUNTER-TREND BLOCK ====================
+        # This is a HARD REJECTION, not just a penalty. Counter-trend trades are the
+        # primary cause of losses in trending markets.
+        from app.strategies.adaptive.market_regime import MarketRegime
+        if direction == 'long' and regime == MarketRegime.TRENDING_DOWN:
+            logger.warning(f"🚫 HARD BLOCK: Cannot LONG in TRENDING_DOWN regime - rejecting signal")
+            self._pending_signal = None
+            self._confirmation_count = 0
+            return None
+        elif direction == 'short' and regime == MarketRegime.TRENDING_UP:
+            logger.warning(f"🚫 HARD BLOCK: Cannot SHORT in TRENDING_UP regime - rejecting signal")
+            self._pending_signal = None
+            self._confirmation_count = 0
+            return None
+        
+        # ==================== SUPERTREND HARD BLOCK ====================
+        # If supertrend is strongly against the trade direction, reject
+        st_result = self.supertrend.calculate(candles)
+        if st_result:
+            st_against = (
+                (direction == 'long' and st_result.direction == SupertrendDirection.BEARISH) or
+                (direction == 'short' and st_result.direction == SupertrendDirection.BULLISH)
+            )
+            if st_against and st_result.strength > 1.5:  # Strong trend against us
+                logger.warning(f"🚫 HARD BLOCK: {direction.upper()} against strong Supertrend ({st_result.direction.value}, strength={st_result.strength:.1f})")
+                self._pending_signal = None
+                self._confirmation_count = 0
+                return None
+        
         # ==================== WHIPSAW PROTECTION ====================
         
         # 1. Direction Lock Check - adaptive based on volatility
@@ -1367,8 +1396,15 @@ class SwingStrategy:
         
         # Check if we have enough confirmations (use adaptive count)
         if self._confirmation_count >= confirmations_needed:
-            # Check average score during confirmation
-            avg_score = sum(self._pending_signal['scores']) / len(self._pending_signal['scores'])
+            # Check average score during confirmation (guard against empty list)
+            scores = self._pending_signal.get('scores', [])
+            if not scores:
+                logger.warning("⚠️ No scores in confirmation - resetting")
+                self._pending_signal = None
+                self._confirmation_count = 0
+                return False
+            
+            avg_score = sum(scores) / len(scores)
             if avg_score < self.min_signal_score * 0.9:  # Must maintain 90% of threshold
                 logger.info(f"❌ Confirmation failed: avg score {avg_score:.1f} < {self.min_signal_score * 0.9:.1f}")
                 self._pending_signal = None
