@@ -661,11 +661,11 @@ class SwingStrategy:
         if direction == 'long' and regime == MarketRegime.TRENDING_DOWN:
             score -= self.regime_penalty  # -5 points
             details['penalties'].append({'type': 'regime', 'score': -self.regime_penalty, 'reason': 'LONG in downtrend'})
-            logger.warning(f"   ⛔ REGIME PENALTY: -{self.regime_penalty} (LONG against TRENDING_DOWN)")
+            logger.debug(f"   ⛔ REGIME PENALTY: -{self.regime_penalty} (LONG against TRENDING_DOWN)")
         elif direction == 'short' and regime == MarketRegime.TRENDING_UP:
             score -= self.regime_penalty  # -5 points
             details['penalties'].append({'type': 'regime', 'score': -self.regime_penalty, 'reason': 'SHORT in uptrend'})
-            logger.warning(f"   ⛔ REGIME PENALTY: -{self.regime_penalty} (SHORT against TRENDING_UP)")
+            logger.debug(f"   ⛔ REGIME PENALTY: -{self.regime_penalty} (SHORT against TRENDING_UP)")
         elif (direction == 'long' and regime == MarketRegime.TRENDING_UP) or \
              (direction == 'short' and regime == MarketRegime.TRENDING_DOWN):
             score += 2.0  # Bonus for trend alignment
@@ -706,7 +706,7 @@ class SwingStrategy:
                     'score': -self.supertrend_penalty,
                     'warning': 'Trading against trend!'
                 }
-                logger.warning(f"   ⛔ SUPERTREND PENALTY: -{self.supertrend_penalty} (AGAINST {st_result.direction.value} trend!)")
+                logger.debug(f"   ⛔ SUPERTREND PENALTY: -{self.supertrend_penalty} (AGAINST {st_result.direction.value} trend!)")
         
         # ========== DONCHIAN CHANNEL (0-1.5 points) ==========
         dc_result = self.donchian.calculate(candles)
@@ -792,7 +792,7 @@ class SwingStrategy:
             score -= self.volume_penalty  # -2 points
             details['penalties'].append({'type': 'volume', 'score': -self.volume_penalty, 'reason': f'Weak volume ({volume_ratio:.1f}x)'})
             details['volume'] = {'confirmed': False, 'ratio': volume_ratio}
-            logger.warning(f"   ⛔ VOLUME PENALTY: -{self.volume_penalty} (weak: {volume_ratio:.1f}x)")
+            logger.debug(f"   ⛔ VOLUME PENALTY: -{self.volume_penalty} (weak: {volume_ratio:.1f}x)")
         
         # ========== STOCH RSI (0-1.5 points) ==========
         # More sensitive than regular RSI for detecting extreme conditions
@@ -943,10 +943,8 @@ class SwingStrategy:
         details['raw_score'] = int(score)
         details['final_score'] = final_score
         
-        if total_penalties < 0:
-            logger.info(f"   📊 Score: {base_score} (base) + bonuses - {abs(total_penalties):.0f} (penalties) = {final_score}/{self.max_signal_score}")
-        else:
-            logger.debug(f"   📊 Final Score: {final_score}/{self.max_signal_score}")
+        # Only log score summary at debug level (too verbose for info)
+        logger.debug(f"   📊 Score: {base_score} (base) + bonuses - {abs(total_penalties):.0f} (penalties) = {final_score}/{self.max_signal_score}")
         
         if final_score > self.max_signal_score:
             logger.debug(f"   Score capped: {int(score)} → {final_score}")
