@@ -1526,6 +1526,12 @@ class HyperAIBot:
             # Log to database if available
             if self.db:
                 try:
+                    # Map direction to database signal_type (BUY/SELL)
+                    # long -> BUY (we're buying to open long)
+                    # short -> SELL (we're selling to open short)
+                    direction = signal.get('direction', signal.get('side', 'long'))
+                    db_signal_type = 'BUY' if direction.lower() in ['long', 'buy'] else 'SELL'
+                    
                     # Insert signal with indicators
                     indicators = {
                         'rsi': market_data.get('rsi'),
@@ -1542,9 +1548,9 @@ class HyperAIBot:
                     
                     signal_id = await self.db.insert_signal(
                         symbol=signal.get('symbol', self.symbol),
-                        signal_type=signal.get('signal', 'BUY'),
-                        price=float(signal.get('price', 0)),
-                        confidence_score=float(signal.get('confidence', 0)),
+                        signal_type=db_signal_type,  # Use mapped BUY/SELL
+                        price=float(signal.get('entry_price', signal.get('price', 0))),
+                        confidence_score=float(signal.get('signal_score', signal.get('confidence', 0))),
                         indicators=indicators,
                         volatility=market_data.get('volatility'),
                         liquidity_score=market_data.get('liquidity_score')
@@ -1554,10 +1560,10 @@ class HyperAIBot:
                     if result.get('success'):
                         trade_id = await self.db.insert_trade(
                             symbol=signal.get('symbol', self.symbol),
-                            signal_type=signal.get('signal', 'BUY'),
+                            signal_type=db_signal_type,  # Use mapped BUY/SELL
                             entry_price=float(result.get('entry_price', signal.get('entry_price', 0))),
                             quantity=float(result.get('quantity', signal.get('size', 0))),
-                            confidence_score=float(signal.get('confidence', 0)),
+                            confidence_score=float(signal.get('signal_score', signal.get('confidence', 0))),
                             strategy_name=signal.get('strategy'),
                             account_equity=float(self.account_value),
                             session_pnl=float(self.session_pnl),
@@ -1573,11 +1579,12 @@ class HyperAIBot:
                             'trade_id': trade_id,
                             'entry_price': float(result.get('entry_price', signal.get('entry_price', 0))),
                             'quantity': float(result.get('quantity', signal.get('size', 0))),
-                            'side': signal.get('side', signal.get('signal', 'buy')),
+                            'side': direction,  # Store actual direction (long/short)
+                            'signal_type': db_signal_type,  # Store BUY/SELL for DB
                             'entry_time': datetime.now(timezone.utc)
                         }
                         
-                        logger.info(f"📊 Logged to database: signal_id={signal_id}, trade_id={trade_id}")
+                        logger.info(f"📊 Logged to database: signal_id={signal_id}, trade_id={trade_id}, type={db_signal_type}")
                     else:
                         # Signal rejected
                         await self.db.mark_signal_rejected(

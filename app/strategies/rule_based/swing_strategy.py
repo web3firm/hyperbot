@@ -78,9 +78,28 @@ class SwingStrategy:
         # TP/SL is calculated dynamically by AdaptiveRiskManager using ATR
         # See ATR_SL_MULTIPLIER and ATR_TP_MULTIPLIER in .env
         
-        # Signal threshold - BE PATIENT, WAIT FOR A+ SETUPS
-        self.min_signal_score = int(os.getenv('MIN_SIGNAL_SCORE', '7'))  # Raised to 7/10
-        self.max_signal_score = 10
+        # ==================== SCORING SYSTEM ====================
+        # Full theoretical max: ~25 points (all indicators perfectly aligned)
+        # Score breakdown:
+        #   Base (tech+SMC+HTF+OF+BoS): ~12 points
+        #   Enhanced (regime+supertrend+donchian+vwap+div+vol+stoch+obv+cmf): ~13 points
+        #
+        # Penalty System (critical failures subtract points):
+        #   - Counter-trend trade (regime mismatch): -5 points
+        #   - Against Supertrend: -3 points  
+        #   - Weak volume (below average): -2 points
+        #   - OBV/CMF divergence against direction: -2 points
+        #   - HTF misalignment: -3 points
+        #
+        # This means a "good" 18-point signal can become 8 if it fails critical checks
+        self.min_signal_score = int(os.getenv('MIN_SIGNAL_SCORE', '15'))  # 15/25 = 60%
+        self.max_signal_score = 25  # Full theoretical range
+        
+        # Penalty thresholds for critical failures
+        self.regime_penalty = 5.0      # Counter-trend is dangerous
+        self.supertrend_penalty = 3.0  # Against major trend
+        self.volume_penalty = 2.0      # No volume = fake move
+        self.htf_penalty = 3.0         # Against higher timeframe
         
         # Technical indicator periods
         self.rsi_period = 14
@@ -293,7 +312,7 @@ class SwingStrategy:
         self._short_score_history.append(short_enhanced)
         
         # Log both scores for visibility
-        logger.debug(f"📊 Scores: LONG={long_enhanced}/12 | SHORT={short_enhanced}/12 | Regime={regime.value}")
+        logger.debug(f"📊 Scores: LONG={long_enhanced}/{self.max_signal_score} | SHORT={short_enhanced}/{self.max_signal_score} | Regime={regime.value}")
         
         # Determine best direction
         if long_enhanced >= self.min_signal_score and long_enhanced > short_enhanced:
@@ -311,7 +330,7 @@ class SwingStrategy:
             self._pending_signal = None
             self._confirmation_count = 0
             if long_enhanced > 0 or short_enhanced > 0:
-                logger.debug(f"⏳ No signal: LONG={long_enhanced}/7, SHORT={short_enhanced}/7 (need 7+)")
+                logger.debug(f"⏳ No signal: LONG={long_enhanced}/{self.min_signal_score}, SHORT={short_enhanced}/{self.min_signal_score} (need {self.min_signal_score}+)")
             return None
         
         # ==================== WHIPSAW PROTECTION ====================
@@ -614,6 +633,12 @@ class SwingStrategy:
         
         Total max additional: ~13 points
         
+        PENALTY SYSTEM (critical failures):
+        - Counter-trend (regime): -5 points
+        - Against Supertrend: -3 points
+        - Weak volume: -2 points
+        - HTF misalignment: -3 points
+        
         Args:
             direction: 'long' or 'short'
             candles: OHLCV candles
@@ -624,9 +649,28 @@ class SwingStrategy:
             Tuple of (enhanced_score, details)
         """
         score = base_score
-        details = {'base_score': base_score}
+        details = {'base_score': base_score, 'penalties': []}
         
-        # ========== SUPERTREND (0-2 points) ==========
+        # ========== REGIME ALIGNMENT CHECK (CRITICAL) ==========
+        # Counter-trend trading is DANGEROUS - heavy penalty
+        from app.strategies.adaptive.market_regime import MarketRegime
+        regime = self.regime_detector.detect_regime(candles)
+        
+        if direction == 'long' and regime == MarketRegime.TRENDING_DOWN:
+            score -= self.regime_penalty  # -5 points
+            details['penalties'].append({'type': 'regime', 'score': -self.regime_penalty, 'reason': 'LONG in downtrend'})
+            logger.warning(f"   ⛔ REGIME PENALTY: -{self.regime_penalty} (LONG against TRENDING_DOWN)")
+        elif direction == 'short' and regime == MarketRegime.TRENDING_UP:
+            score -= self.regime_penalty  # -5 points
+            details['penalties'].append({'type': 'regime', 'score': -self.regime_penalty, 'reason': 'SHORT in uptrend'})
+            logger.warning(f"   ⛔ REGIME PENALTY: -{self.regime_penalty} (SHORT against TRENDING_UP)")
+        elif (direction == 'long' and regime == MarketRegime.TRENDING_UP) or \
+             (direction == 'short' and regime == MarketRegime.TRENDING_DOWN):
+            score += 2.0  # Bonus for trend alignment
+            details['regime_bonus'] = {'score': 2.0, 'reason': 'Trading WITH trend'}
+            logger.debug(f"   ✅ Regime: +2.0 (Trading WITH {regime.value})")
+        
+        # ========== SUPERTREND (CRITICAL) ==========
         # This is a key trend filter - trading against supertrend is risky
         st_result = self.supertrend.calculate(candles)
         if st_result:
@@ -637,7 +681,7 @@ class SwingStrategy:
             
             if st_aligned:
                 # Aligned with supertrend - bonus points
-                st_score = 1.0
+                st_score = 1.5
                 if st_result.changed:  # Fresh flip = extra confidence
                     st_score += 0.5
                 if st_result.strength > 1.0:  # Strong trend
@@ -649,17 +693,18 @@ class SwingStrategy:
                     'score': st_score,
                     'strength': st_result.strength
                 }
-                logger.debug(f"   Supertrend: +{st_score:.1f} ({st_result.direction.value}, strength={st_result.strength:.1f}%)")
+                logger.debug(f"   ✅ Supertrend: +{st_score:.1f} ({st_result.direction.value}, strength={st_result.strength:.1f}%)")
             else:
-                # Against supertrend - penalty (this is a major warning!)
-                score -= 1.5
+                # Against supertrend - HEAVY PENALTY (this is dangerous!)
+                score -= self.supertrend_penalty  # -3 points
+                details['penalties'].append({'type': 'supertrend', 'score': -self.supertrend_penalty, 'reason': f'Against {st_result.direction.value}'})
                 details['supertrend'] = {
                     'aligned': False,
                     'direction': st_result.direction.value,
-                    'score': -1.5,
+                    'score': -self.supertrend_penalty,
                     'warning': 'Trading against trend!'
                 }
-                logger.debug(f"   Supertrend: -1.5 (AGAINST {st_result.direction.value} trend!)")
+                logger.warning(f"   ⛔ SUPERTREND PENALTY: -{self.supertrend_penalty} (AGAINST {st_result.direction.value} trend!)")
         
         # ========== DONCHIAN CHANNEL (0-1.5 points) ==========
         dc_result = self.donchian.calculate(candles)
@@ -733,17 +778,19 @@ class SwingStrategy:
                 details['divergence'] = {'score': div_score, 'reason': div_reason}
                 logger.debug(f"   Divergence: +{div_score:.1f} ({div_reason})")
         
-        # ========== VOLUME CONFIRMATION (0-1 point) ==========
+        # ========== VOLUME CONFIRMATION (CRITICAL) ==========
+        # "Volume is truth" - no volume = fake move
         volume_ok, volume_ratio = self._check_volume_confirmation(candles)
         if volume_ok:
-            score += 1
+            score += 1.5  # Increased bonus for volume confirmation
             details['volume'] = {'confirmed': True, 'ratio': volume_ratio}
-            logger.debug(f"   Volume: +1 (ratio: {volume_ratio:.1f}x)")
+            logger.debug(f"   ✅ Volume: +1.5 (ratio: {volume_ratio:.1f}x)")
         else:
-            # Slight penalty for below-average volume
-            score -= 0.5
+            # Weak volume is a serious warning - PENALTY
+            score -= self.volume_penalty  # -2 points
+            details['penalties'].append({'type': 'volume', 'score': -self.volume_penalty, 'reason': f'Weak volume ({volume_ratio:.1f}x)'})
             details['volume'] = {'confirmed': False, 'ratio': volume_ratio}
-            logger.debug(f"   Volume: -0.5 (weak: {volume_ratio:.1f}x)")
+            logger.warning(f"   ⛔ VOLUME PENALTY: -{self.volume_penalty} (weak: {volume_ratio:.1f}x)")
         
         # ========== STOCH RSI (0-1.5 points) ==========
         # More sensitive than regular RSI for detecting extreme conditions
@@ -884,7 +931,25 @@ class SwingStrategy:
                 }
                 logger.debug(f"   CMF: {cmf_score:+.1f} ({cmf_reason})")
         
-        return int(score), details
+        # ========== FINAL SCORE CALCULATION ==========
+        # Floor at 0 (can't go negative) and cap at max_signal_score
+        final_score = max(0, min(int(score), self.max_signal_score))
+        
+        # Calculate total penalties for logging
+        total_penalties = sum(p['score'] for p in details.get('penalties', []))
+        details['total_penalties'] = total_penalties
+        details['raw_score'] = int(score)
+        details['final_score'] = final_score
+        
+        if total_penalties < 0:
+            logger.info(f"   📊 Score: {base_score} (base) + bonuses - {abs(total_penalties):.0f} (penalties) = {final_score}/{self.max_signal_score}")
+        else:
+            logger.debug(f"   📊 Final Score: {final_score}/{self.max_signal_score}")
+        
+        if final_score > self.max_signal_score:
+            logger.debug(f"   Score capped: {int(score)} → {final_score}")
+        
+        return final_score, details
     
     def _check_volume_confirmation(self, candles: List[Dict]) -> Tuple[bool, float]:
         """
@@ -1398,7 +1463,8 @@ class SwingStrategy:
             True if signal is still valid, False if conditions changed
         """
         entry_price = Decimal(str(signal.get('entry_price', 0)))
-        side = signal.get('side', '').lower()
+        # Handle both 'side' and 'direction' keys, and both naming conventions
+        side = signal.get('side', signal.get('direction', '')).lower()
         
         if entry_price <= 0:
             return True  # Can't validate without entry price
@@ -1413,13 +1479,13 @@ class SwingStrategy:
             logger.warning(f"Signal invalidated: price moved {deviation_pct:.2f}% from entry")
             return False
         
-        # For buys, price shouldn't have dropped too much (might indicate reversal)
-        # For sells, price shouldn't have risen too much
-        if side == 'buy' and current_price < entry_price * Decimal('0.995'):
-            logger.warning(f"Buy signal invalidated: price dropped below entry")
+        # For longs/buys, price shouldn't have dropped too much (might indicate reversal)
+        # For shorts/sells, price shouldn't have risen too much
+        if side in ('buy', 'long') and current_price < entry_price * Decimal('0.995'):
+            logger.warning(f"Long signal invalidated: price dropped below entry")
             return False
-        elif side == 'sell' and current_price > entry_price * Decimal('1.005'):
-            logger.warning(f"Sell signal invalidated: price rose above entry")
+        elif side in ('sell', 'short') and current_price > entry_price * Decimal('1.005'):
+            logger.warning(f"Short signal invalidated: price rose above entry")
             return False
         
         return True

@@ -238,14 +238,16 @@ class RiskEngine:
         
         equity = self.account_manager.current_equity
         margin_used = self.account_manager.margin_used
+        peak_equity = self.account_manager.peak_equity
+        session_start_equity = self.account_manager.session_start_equity
         
         return {
             'risk_score': risk_score,
             'risk_level': risk_level,
             'is_enabled': self.is_enabled,
             'margin_usage_pct': float(margin_used / equity * 100) if equity > 0 else 0,
-            'current_drawdown_pct': float((self.account_manager.peak_equity - equity) / self.account_manager.peak_equity * 100),
-            'daily_loss_pct': float(abs(self.account_manager.session_pnl / self.account_manager.session_start_equity * 100)) if self.account_manager.session_pnl < 0 else 0,
+            'current_drawdown_pct': float((peak_equity - equity) / peak_equity * 100) if peak_equity > 0 else 0,
+            'daily_loss_pct': float(abs(self.account_manager.session_pnl / session_start_equity * 100)) if self.account_manager.session_pnl < 0 and session_start_equity > 0 else 0,
             'open_positions': len(self.position_manager.open_positions),
             'daily_trades': self.daily_trades,
             'hourly_trades': self.hourly_trades,
@@ -258,20 +260,23 @@ class RiskEngine:
         warnings = []
         
         equity = self.account_manager.current_equity
+        peak_equity = self.account_manager.peak_equity
+        session_start_equity = self.account_manager.session_start_equity
         
         # Check margin usage
         margin_usage_pct = float(self.account_manager.margin_used / equity * 100) if equity > 0 else 0
         if margin_usage_pct > 70:
             warnings.append(f"High margin usage: {margin_usage_pct:.1f}%")
         
-        # Check drawdown
-        drawdown_pct = float((self.account_manager.peak_equity - equity) / self.account_manager.peak_equity * 100)
-        if drawdown_pct > 7:
-            warnings.append(f"High drawdown: {drawdown_pct:.1f}%")
+        # Check drawdown (guard for peak_equity > 0)
+        if peak_equity > 0:
+            drawdown_pct = float((peak_equity - equity) / peak_equity * 100)
+            if drawdown_pct > 7:
+                warnings.append(f"High drawdown: {drawdown_pct:.1f}%")
         
-        # Check daily loss
-        if self.account_manager.session_pnl < 0:
-            daily_loss_pct = abs(float(self.account_manager.session_pnl / self.account_manager.session_start_equity * 100))
+        # Check daily loss (guard for session_start_equity > 0)
+        if self.account_manager.session_pnl < 0 and session_start_equity > 0:
+            daily_loss_pct = abs(float(self.account_manager.session_pnl / session_start_equity * 100))
             if daily_loss_pct > 3:
                 warnings.append(f"Daily loss approaching limit: {daily_loss_pct:.1f}%")
         

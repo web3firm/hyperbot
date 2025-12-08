@@ -7,6 +7,7 @@ import asyncpg
 from typing import Optional, Dict, List, Any
 from datetime import datetime, timezone
 from pathlib import Path
+from contextlib import asynccontextmanager
 import logging
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,14 @@ class DatabaseManager:
         self.min_pool_size = min_pool_size
         self.max_pool_size = max_pool_size
         self.pool: Optional[asyncpg.Pool] = None
+    
+    @asynccontextmanager
+    async def _get_conn(self):
+        """Get a connection from pool with automatic pool check"""
+        if not self.pool:
+            raise RuntimeError("Database pool not initialized. Call connect() first.")
+        async with self._get_conn() as conn:
+            yield conn
         
     async def connect(self):
         """Create connection pool"""
@@ -44,6 +53,10 @@ class DatabaseManager:
             await self.run_migrations()
             
         except Exception as e:
+            # Clean up pool if it was created before failure
+            if self.pool:
+                await self.pool.close()
+                self.pool = None
             logger.error(f"❌ Database connection failed: {e}")
             raise
     
@@ -62,7 +75,7 @@ class DatabaseManager:
                 with open(schema_file, 'r') as f:
                     schema_sql = f.read()
                 
-                async with self.pool.acquire() as conn:
+                async with self._get_conn() as conn:
                     await conn.execute(schema_sql)
                     logger.info("✅ Database schema migrations completed")
             else:
@@ -92,7 +105,7 @@ class DatabaseManager:
         Returns:
             Trade ID
         """
-        async with self.pool.acquire() as conn:
+        async with self._get_conn() as conn:
             trade_id = await conn.fetchval(
                 """
                 INSERT INTO trades (
@@ -119,7 +132,7 @@ class DatabaseManager:
         duration_seconds: Optional[int] = None
     ):
         """Close an existing trade with exit data"""
-        async with self.pool.acquire() as conn:
+        async with self._get_conn() as conn:
             await conn.execute(
                 """
                 UPDATE trades SET
@@ -138,7 +151,7 @@ class DatabaseManager:
     
     async def get_open_trades(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get all open trades, optionally filtered by symbol"""
-        async with self.pool.acquire() as conn:
+        async with self._get_conn() as conn:
             if symbol:
                 rows = await conn.fetch(
                     "SELECT * FROM trades WHERE status = 'OPEN' AND symbol = $1 ORDER BY timestamp DESC",
@@ -152,7 +165,7 @@ class DatabaseManager:
     
     async def get_recent_trades(self, limit: int = 10, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get recent closed trades"""
-        async with self.pool.acquire() as conn:
+        async with self._get_conn() as conn:
             if symbol:
                 rows = await conn.fetch(
                     "SELECT * FROM trades WHERE status = 'CLOSED' AND symbol = $1 ORDER BY closed_at DESC LIMIT $2",
@@ -187,7 +200,7 @@ class DatabaseManager:
         Returns:
             Signal ID
         """
-        async with self.pool.acquire() as conn:
+        async with self._get_conn() as conn:
             signal_id = await conn.fetchval(
                 """
                 INSERT INTO signals (
@@ -211,7 +224,7 @@ class DatabaseManager:
     
     async def mark_signal_executed(self, signal_id: int, trade_id: int):
         """Mark a signal as executed with corresponding trade ID"""
-        async with self.pool.acquire() as conn:
+        async with self._get_conn() as conn:
             await conn.execute(
                 "UPDATE signals SET executed = TRUE, trade_id = $2 WHERE id = $1",
                 signal_id, trade_id
@@ -219,7 +232,7 @@ class DatabaseManager:
     
     async def mark_signal_rejected(self, signal_id: int, reason: str):
         """Mark a signal as rejected with reason"""
-        async with self.pool.acquire() as conn:
+        async with self._get_conn() as conn:
             await conn.execute(
                 "UPDATE signals SET executed = FALSE, rejection_reason = $2 WHERE id = $1",
                 signal_id, reason
@@ -248,7 +261,7 @@ class DatabaseManager:
         Returns:
             True if trade was updated, False if no open trade found
         """
-        async with self.pool.acquire() as conn:
+        async with self._get_conn() as conn:
             # Find most recent open trade for this symbol
             trade = await conn.fetchrow(
                 """
@@ -296,7 +309,8 @@ class DatabaseManager:
         Returns:
             Dict with win_rate, avg_win, avg_loss, total_trades, etc.
         """
-        async with self.pool.acquire() as conn:
+        async with self._get_conn() as conn:
+            # Use parameterized query to prevent SQL injection
             stats = await conn.fetchrow(
                 """
                 SELECT 
@@ -310,9 +324,10 @@ class DatabaseManager:
                     STDDEV(pnl) as pnl_stddev
                 FROM trades
                 WHERE status = 'CLOSED'
-                    AND closed_at >= NOW() - INTERVAL '%s days'
+                    AND closed_at >= NOW() - INTERVAL '1 day' * $1
                     AND pnl IS NOT NULL
-                """ % days
+                """,
+                days  # Safe parameterized query
             )
             
             if not stats or stats['total_trades'] == 0:
@@ -366,7 +381,7 @@ class DatabaseManager:
                 feature_names[i] = name
                 feature_importances[i] = importance
         
-        async with self.pool.acquire() as conn:
+        async with self._get_conn() as conn:
             pred_id = await conn.fetchval(
                 """
                 INSERT INTO ml_predictions (
@@ -386,7 +401,7 @@ class DatabaseManager:
     
     async def update_prediction_outcome(self, prediction_id: int, actual_signal: str, was_correct: bool):
         """Update ML prediction with actual outcome"""
-        async with self.pool.acquire() as conn:
+        async with self._get_conn() as conn:
             await conn.execute(
                 "UPDATE ml_predictions SET actual_signal = $2, was_correct = $3 WHERE id = $1",
                 prediction_id, actual_signal, was_correct
@@ -411,7 +426,7 @@ class DatabaseManager:
         sharpe_ratio: Optional[float] = None
     ):
         """Insert account snapshot"""
-        async with self.pool.acquire() as conn:
+        async with self._get_conn() as conn:
             await conn.execute(
                 """
                 INSERT INTO account_snapshots (
@@ -431,7 +446,7 @@ class DatabaseManager:
     
     async def get_daily_performance(self, days: int = 30) -> List[Dict[str, Any]]:
         """Get daily performance stats"""
-        async with self.pool.acquire() as conn:
+        async with self._get_conn() as conn:
             rows = await conn.fetch(
                 "SELECT * FROM daily_performance ORDER BY trade_date DESC LIMIT $1",
                 days
@@ -440,25 +455,25 @@ class DatabaseManager:
     
     async def get_symbol_performance(self) -> List[Dict[str, Any]]:
         """Get performance by symbol"""
-        async with self.pool.acquire() as conn:
+        async with self._get_conn() as conn:
             rows = await conn.fetch("SELECT * FROM symbol_performance ORDER BY total_pnl DESC")
             return [dict(row) for row in rows]
     
     async def get_hourly_activity(self) -> List[Dict[str, Any]]:
         """Get trading activity by hour"""
-        async with self.pool.acquire() as conn:
+        async with self._get_conn() as conn:
             rows = await conn.fetch("SELECT * FROM hourly_activity ORDER BY hour_utc")
             return [dict(row) for row in rows]
     
     async def get_ml_model_performance(self) -> List[Dict[str, Any]]:
         """Get ML model accuracy stats"""
-        async with self.pool.acquire() as conn:
+        async with self._get_conn() as conn:
             rows = await conn.fetch("SELECT * FROM ml_model_performance ORDER BY accuracy DESC")
             return [dict(row) for row in rows]
     
     async def get_total_stats(self) -> Dict[str, Any]:
         """Get overall trading statistics"""
-        async with self.pool.acquire() as conn:
+        async with self._get_conn() as conn:
             row = await conn.fetchrow(
                 """
                 SELECT 
@@ -483,7 +498,7 @@ class DatabaseManager:
         
         Returns list of dicts with trade outcomes and signal features
         """
-        async with self.pool.acquire() as conn:
+        async with self._get_conn() as conn:
             query = """
                 SELECT 
                     t.id as trade_id,
@@ -533,7 +548,7 @@ class DatabaseManager:
         consecutive_errors: int = 0
     ):
         """Log system event"""
-        async with self.pool.acquire() as conn:
+        async with self._get_conn() as conn:
             await conn.execute(
                 """
                 INSERT INTO system_events (

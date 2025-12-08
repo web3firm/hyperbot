@@ -1218,9 +1218,14 @@ class HLOrderManager:
         
         pos = self.position_orders[symbol]
         is_long = pos.get('is_buy', True)
-        entry_price = pos.get('entry_price', current_price)
+        entry_price = pos.get('entry_price')
         current_sl = pos.get('sl_price')
         size = pos.get('size', 0)
+        
+        # Cannot trail without entry price - would break profit calculations
+        if not entry_price:
+            logger.warning(f"⚠️ Cannot trail {symbol}: no entry price tracked")
+            return None
         
         if size <= 0:
             return None

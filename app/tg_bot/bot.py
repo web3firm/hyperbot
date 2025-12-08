@@ -986,8 +986,8 @@ class TelegramBot:
             lines.extend([
                 "",
                 "─────── Strategy ───────",
-                f"Signal Threshold: {os.getenv('SIGNAL_THRESHOLD', '7')}/12",
-                f"Cooldown: {os.getenv('SIGNAL_COOLDOWN_SECONDS', '120')}s",
+                f"Signal Threshold: {os.getenv('MIN_SIGNAL_SCORE', '15')}/25",
+                f"Cooldown: {os.getenv('SIGNAL_COOLDOWN', '180')}s",
             ])
             
             await self._edit_or_reply(update, "\n".join(lines), self.kb.back_to_menu())
@@ -1053,21 +1053,47 @@ class TelegramBot:
                 )
                 return
             
-            # Get market data from websocket
-            market_data = None
+            # Get candles - try multiple sources
+            candles = []
+            current_price = 0
+            
+            # Source 1: Asset manager candle cache (multi-asset mode)
+            if hasattr(self.bot, 'asset_manager') and self.bot.asset_manager:
+                candles = self.bot.asset_manager.get_candles(symbol)
+            
+            # Source 2: Main candles cache (for single-symbol mode)
+            if not candles and hasattr(self.bot, '_candles_cache') and self.bot._candles_cache:
+                if symbol == self.bot.symbol:
+                    candles = self.bot._candles_cache
+            
+            # Source 3: Fetch from API as fallback
+            if not candles or len(candles) < 50:
+                try:
+                    if hasattr(self.bot, 'client') and self.bot.client:
+                        fetched = self.bot.client.get_candles(symbol, interval='1m', limit=200)
+                        if fetched:
+                            candles = fetched
+                            # Store in asset manager if available
+                            if hasattr(self.bot, 'asset_manager') and self.bot.asset_manager:
+                                self.bot.asset_manager.update_candles(symbol, candles)
+                except Exception as e:
+                    logger.warning(f"Failed to fetch candles for {symbol}: {e}")
+            
+            # Get current price
             if hasattr(self.bot, 'websocket') and self.bot.websocket:
                 market_data = self.bot.websocket.get_market_data(symbol)
+                current_price = market_data.get('price', 0)
             
-            if not market_data or not market_data.get('candles'):
+            if not current_price and candles:
+                current_price = float(candles[-1].get('close', candles[-1].get('c', 0)))
+            
+            if not candles or len(candles) < 50:
                 await msg.edit_text(
                     f"❌ No market data available for {symbol}\n\n"
-                    f"_Websocket may need time to collect candles._",
+                    f"_Bot may need time to collect candles. Try again in a minute._",
                     parse_mode='Markdown'
                 )
                 return
-            
-            candles = market_data.get('candles', [])
-            current_price = market_data.get('price', 0)
             
             if len(candles) < 100:
                 await msg.edit_text(
@@ -1093,10 +1119,13 @@ class TelegramBot:
                 regime = r.value if hasattr(r, 'value') else str(r)
                 regime_confidence = conf
             
-            # Calculate signal scores
+            # Calculate signal scores (using enhanced score with penalties)
             long_score = 0
             short_score = 0
-            if hasattr(strategy, '_calculate_signal_score'):
+            long_details = {}
+            short_details = {}
+            
+            if hasattr(strategy, '_calculate_signal_score') and hasattr(strategy, '_calculate_enhanced_score'):
                 from decimal import Decimal
                 price = Decimal(str(current_price))
                 
@@ -1110,7 +1139,8 @@ class TelegramBot:
                 if hasattr(strategy, 'order_flow'):
                     of = strategy.order_flow.analyze_from_candles(candles) or {}
                 
-                long_score = strategy._calculate_signal_score(
+                # Calculate base scores first
+                long_base = strategy._calculate_signal_score(
                     direction='long',
                     indicators=indicators,
                     regime=strategy.regime_detector.current_regime if hasattr(strategy, 'regime_detector') else None,
@@ -1119,7 +1149,7 @@ class TelegramBot:
                     of_analysis=of,
                     current_price=price,
                 )
-                short_score = strategy._calculate_signal_score(
+                short_base = strategy._calculate_signal_score(
                     direction='short',
                     indicators=indicators,
                     regime=strategy.regime_detector.current_regime if hasattr(strategy, 'regime_detector') else None,
@@ -1127,6 +1157,27 @@ class TelegramBot:
                     smc_analysis=smc,
                     of_analysis=of,
                     current_price=price,
+                )
+                
+                # Now calculate enhanced scores with penalties
+                long_score, long_details = strategy._calculate_enhanced_score('long', candles, indicators, long_base)
+                short_score, short_details = strategy._calculate_enhanced_score('short', candles, indicators, short_base)
+            elif hasattr(strategy, '_calculate_signal_score'):
+                # Fallback to base score only
+                from decimal import Decimal
+                price = Decimal(str(current_price))
+                smc = strategy.smc_analyzer.analyze(candles) if hasattr(strategy, 'smc_analyzer') else {}
+                of = strategy.order_flow.analyze_from_candles(candles) if hasattr(strategy, 'order_flow') else {}
+                
+                long_score = strategy._calculate_signal_score(
+                    direction='long', indicators=indicators,
+                    regime=strategy.regime_detector.current_regime if hasattr(strategy, 'regime_detector') else None,
+                    regime_params={}, smc_analysis=smc or {}, of_analysis=of or {}, current_price=price,
+                )
+                short_score = strategy._calculate_signal_score(
+                    direction='short', indicators=indicators,
+                    regime=strategy.regime_detector.current_regime if hasattr(strategy, 'regime_detector') else None,
+                    regime_params={}, smc_analysis=smc or {}, of_analysis=of or {}, current_price=price,
                 )
             
             # Calculate TP/SL levels
@@ -1158,14 +1209,15 @@ class TelegramBot:
             }.get(regime, f'❓ {regime}')
             
             # Determine signal recommendation
-            threshold = int(os.getenv('SIGNAL_THRESHOLD', '7'))
+            threshold = int(os.getenv('MIN_SIGNAL_SCORE', '15'))
+            max_score = 25  # Full theoretical max with all indicators
             if long_score >= threshold and long_score > short_score:
-                signal_rec = f"🟢 *LONG* (Score: {long_score}/12)"
+                signal_rec = f"🟢 *LONG* (Score: {long_score}/{max_score})"
                 rec_entry = current_price
                 rec_sl = long_sl
                 rec_tp = long_tp
             elif short_score >= threshold and short_score > long_score:
-                signal_rec = f"🔴 *SHORT* (Score: {short_score}/12)"
+                signal_rec = f"🔴 *SHORT* (Score: {short_score}/{max_score})"
                 rec_entry = current_price
                 rec_sl = short_sl
                 rec_tp = short_tp
@@ -1203,8 +1255,24 @@ class TelegramBot:
             lines.extend([
                 "",
                 "═══════ SIGNAL SCORES ═══════",
-                f"🟢 Long:  {long_score}/12 {'✅' if long_score >= threshold else ''}",
-                f"🔴 Short: {short_score}/12 {'✅' if short_score >= threshold else ''}",
+                f"🟢 Long:  {long_score}/{max_score} {'✅' if long_score >= threshold else ''}",
+                f"🔴 Short: {short_score}/{max_score} {'✅' if short_score >= threshold else ''}",
+            ])
+            
+            # Add penalty details if any
+            long_penalties = long_details.get('penalties', []) if long_details else []
+            short_penalties = short_details.get('penalties', []) if short_details else []
+            if long_penalties or short_penalties:
+                lines.append("")
+                lines.append("═══════ PENALTIES ═══════")
+                if long_penalties:
+                    for p in long_penalties:
+                        lines.append(f"🟢 ⛔ {p['type']}: {p['score']}")
+                if short_penalties:
+                    for p in short_penalties:
+                        lines.append(f"🔴 ⛔ {p['type']}: {p['score']}")
+            
+            lines.extend([
                 "",
                 "═══════ RECOMMENDATION ═══════",
                 signal_rec,

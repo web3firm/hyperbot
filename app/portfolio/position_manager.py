@@ -120,6 +120,7 @@ class PositionManager:
         # Managed positions
         self.positions: Dict[str, ManagedPosition] = {}
         self.known_position_ids: Set[str] = set()
+        self._positions_lock = asyncio.Lock()  # Thread safety for position modifications
         
         # Load persisted bot positions from file
         self._load_bot_positions()
@@ -180,82 +181,84 @@ class PositionManager:
                 current_positions = []
             new_positions = []
             
-            # Track which symbols have positions
-            current_symbols = set()
-            
-            for pos in current_positions:
-                symbol = pos['symbol']
-                current_symbols.add(symbol)
+            # Thread-safe position modification
+            async with self._positions_lock:
+                # Track which symbols have positions
+                current_symbols = set()
                 
-                # Create position key
-                pos_key = f"{symbol}_{pos['side']}"
+                for pos in current_positions:
+                    symbol = pos['symbol']
+                    current_symbols.add(symbol)
+                    
+                    # Create position key
+                    pos_key = f"{symbol}_{pos['side']}"
+                    
+                    if pos_key not in self.positions:
+                        # New position detected!
+                        is_bot_position = pos_key in self.known_position_ids
+                        
+                        managed = ManagedPosition(
+                            symbol=symbol,
+                            size=abs(pos['size']),
+                            side=pos['side'],
+                            entry_price=pos['entry_price'],
+                            entry_time=datetime.now(timezone.utc),
+                            is_manual=not is_bot_position,  # True if NOT in known_position_ids
+                            unrealized_pnl=pos.get('unrealized_pnl', 0),
+                            # CRITICAL: If bot created this position, it already set TP/SL
+                            # Don't set TP/SL again or we get duplicates!
+                            managed_by_bot=is_bot_position,
+                        )
+                        
+                        # Calculate PnL percentage
+                        if managed.entry_price > 0:
+                            if managed.side == 'long':
+                                current = pos.get('mark_price', managed.entry_price)
+                                managed.unrealized_pnl_pct = (current - managed.entry_price) / managed.entry_price * 100
+                            else:
+                                current = pos.get('mark_price', managed.entry_price)
+                                managed.unrealized_pnl_pct = (managed.entry_price - current) / managed.entry_price * 100
+                        
+                        self.positions[pos_key] = managed
+                        new_positions.append(managed)
+                        
+                        source = "MANUAL" if managed.is_manual else "BOT"
+                        logger.info(f"📍 New {source} position detected: {symbol} {pos['side'].upper()} @ ${pos['entry_price']:.4f}")
+                    else:
+                        # Update existing position
+                        managed = self.positions[pos_key]
+                        managed.size = abs(pos['size'])
+                        managed.unrealized_pnl = pos.get('unrealized_pnl', 0)
+                        
+                        # Update PnL tracking
+                        if managed.entry_price > 0:
+                            current = pos.get('mark_price', managed.entry_price)
+                            if managed.side == 'long':
+                                managed.unrealized_pnl_pct = (current - managed.entry_price) / managed.entry_price * 100
+                                if current > managed.highest_price:
+                                    managed.highest_price = current
+                            else:
+                                managed.unrealized_pnl_pct = (managed.entry_price - current) / managed.entry_price * 100
+                                if current < managed.lowest_price:
+                                    managed.lowest_price = current
+                            
+                            # Track max profit
+                            if managed.unrealized_pnl_pct > managed.max_profit_pct:
+                                managed.max_profit_pct = managed.unrealized_pnl_pct
+                            
+                            # Track max drawdown from peak
+                            drawdown = managed.max_profit_pct - managed.unrealized_pnl_pct
+                            if drawdown > managed.max_drawdown_pct:
+                                managed.max_drawdown_pct = drawdown
                 
-                if pos_key not in self.positions:
-                    # New position detected!
-                    is_bot_position = pos_key in self.known_position_ids
-                    
-                    managed = ManagedPosition(
-                        symbol=symbol,
-                        size=abs(pos['size']),
-                        side=pos['side'],
-                        entry_price=pos['entry_price'],
-                        entry_time=datetime.now(timezone.utc),
-                        is_manual=not is_bot_position,  # True if NOT in known_position_ids
-                        unrealized_pnl=pos.get('unrealized_pnl', 0),
-                        # CRITICAL: If bot created this position, it already set TP/SL
-                        # Don't set TP/SL again or we get duplicates!
-                        managed_by_bot=is_bot_position,
-                    )
-                    
-                    # Calculate PnL percentage
-                    if managed.entry_price > 0:
-                        if managed.side == 'long':
-                            current = pos.get('mark_price', managed.entry_price)
-                            managed.unrealized_pnl_pct = (current - managed.entry_price) / managed.entry_price * 100
-                        else:
-                            current = pos.get('mark_price', managed.entry_price)
-                            managed.unrealized_pnl_pct = (managed.entry_price - current) / managed.entry_price * 100
-                    
-                    self.positions[pos_key] = managed
-                    new_positions.append(managed)
-                    
-                    source = "MANUAL" if managed.is_manual else "BOT"
-                    logger.info(f"📍 New {source} position detected: {symbol} {pos['side'].upper()} @ ${pos['entry_price']:.4f}")
-                else:
-                    # Update existing position
-                    managed = self.positions[pos_key]
-                    managed.size = abs(pos['size'])
-                    managed.unrealized_pnl = pos.get('unrealized_pnl', 0)
-                    
-                    # Update PnL tracking
-                    if managed.entry_price > 0:
-                        current = pos.get('mark_price', managed.entry_price)
-                        if managed.side == 'long':
-                            managed.unrealized_pnl_pct = (current - managed.entry_price) / managed.entry_price * 100
-                            if current > managed.highest_price:
-                                managed.highest_price = current
-                        else:
-                            managed.unrealized_pnl_pct = (managed.entry_price - current) / managed.entry_price * 100
-                            if current < managed.lowest_price:
-                                managed.lowest_price = current
-                        
-                        # Track max profit
-                        if managed.unrealized_pnl_pct > managed.max_profit_pct:
-                            managed.max_profit_pct = managed.unrealized_pnl_pct
-                        
-                        # Track max drawdown from peak
-                        drawdown = managed.max_profit_pct - managed.unrealized_pnl_pct
-                        if drawdown > managed.max_drawdown_pct:
-                            managed.max_drawdown_pct = drawdown
-            
-            # Remove closed positions - simplified comprehension
-            closed_symbols = set(self.positions.keys()) - {f"{p['symbol']}_{p['side']}" for p in current_positions}
-            for pos_key in closed_symbols:
-                logger.info(f"📤 Position closed: {pos_key}")
-                del self.positions[pos_key]
-                # Also remove from known bot positions
-                symbol, side = pos_key.rsplit('_', 1)
-                self.unmark_position(symbol, side)
+                # Remove closed positions - simplified comprehension
+                closed_symbols = set(self.positions.keys()) - {f"{p['symbol']}_{p['side']}" for p in current_positions}
+                for pos_key in closed_symbols:
+                    logger.info(f"📤 Position closed: {pos_key}")
+                    del self.positions[pos_key]
+                    # Also remove from known bot positions
+                    symbol, side = pos_key.rsplit('_', 1)
+                    self.unmark_position(symbol, side)
             
             return new_positions
             
@@ -662,10 +665,11 @@ class PositionManager:
             if result.get('status') == 'ok' or 'response' in result:
                 logger.info(f"✅ Early exit executed for {position.symbol}")
                 
-                # Remove from tracked positions
+                # Remove from tracked positions (thread-safe)
                 pos_key = f"{position.symbol}_{position.side}"
-                if pos_key in self.positions:
-                    del self.positions[pos_key]
+                async with self._positions_lock:
+                    if pos_key in self.positions:
+                        del self.positions[pos_key]
             else:
                 logger.error(f"❌ Early exit failed: {result}")
                 
