@@ -34,7 +34,7 @@ class DatabaseManager:
         """Get a connection from pool with automatic pool check"""
         if not self.pool:
             raise RuntimeError("Database pool not initialized. Call connect() first.")
-        async with self._get_conn() as conn:
+        async with self.pool.acquire() as conn:
             yield conn
         
     async def connect(self):
