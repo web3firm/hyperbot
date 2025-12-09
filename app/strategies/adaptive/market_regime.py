@@ -170,12 +170,27 @@ class MarketRegimeDetector:
         
         # Check for TRENDING regime
         if regime == MarketRegime.UNKNOWN and adx_val > self.adx_trending_threshold:
-            # Determine trend direction
+            # Determine trend direction with HYSTERESIS to prevent flip-flopping
             if ema_fast and ema_slow:
-                if ema_fast > ema_slow:
+                ema_diff_pct = (float(ema_fast) - float(ema_slow)) / float(ema_slow) * 100 if ema_slow else 0
+                
+                # Require 0.1% difference to confirm trend direction (hysteresis)
+                # This prevents flip-flopping when EMAs are very close
+                if ema_diff_pct > 0.1:  # Clear uptrend
                     regime = MarketRegime.TRENDING_UP
-                else:
+                elif ema_diff_pct < -0.1:  # Clear downtrend
                     regime = MarketRegime.TRENDING_DOWN
+                else:
+                    # EMAs too close - stay in previous direction or use price action
+                    if self.current_regime in [MarketRegime.TRENDING_UP, MarketRegime.TRENDING_DOWN]:
+                        regime = self.current_regime  # Keep current direction
+                    else:
+                        # Use price action as tiebreaker
+                        prices = [Decimal(str(c.get('close', c.get('c', 0)))) for c in candles[-20:]]
+                        if prices[-1] > prices[0]:
+                            regime = MarketRegime.TRENDING_UP
+                        else:
+                            regime = MarketRegime.TRENDING_DOWN
             else:
                 # Use price action
                 prices = [Decimal(str(c.get('close', c.get('c', 0)))) for c in candles[-20:]]
@@ -201,16 +216,29 @@ class MarketRegimeDetector:
         if regime == MarketRegime.UNKNOWN:
             confidence = 0.3
         
-        # Update state
+        # Update state with CONFIRMATION to prevent rapid flip-flopping
         self.regime_history.append(regime)
+        
+        # Only change regime if:
+        # 1. It's a different regime, AND
+        # 2. We've seen the same new regime at least 2 times in last 3 checks (confirmation)
         if regime != self.current_regime:
-            self.current_regime = regime
-            self.regime_start_time = datetime.now(timezone.utc)
-            logger.info(f"🔄 Regime changed to: {regime.value} (confidence: {confidence:.1%})")
+            recent = list(self.regime_history)[-3:] if len(self.regime_history) >= 3 else list(self.regime_history)
+            regime_count = sum(1 for r in recent if r == regime)
+            
+            if regime_count >= 2:  # Confirmed - regime seen at least 2x in last 3 checks
+                old_regime = self.current_regime
+                self.current_regime = regime
+                self.regime_start_time = datetime.now(timezone.utc)
+                logger.info(f"🔄 Regime changed: {old_regime.value if old_regime else 'NONE'} → {regime.value} (confidence: {confidence:.1%})")
+            else:
+                # Not confirmed yet - keep current regime but log at debug level
+                logger.debug(f"📊 Regime candidate: {regime.value} (awaiting confirmation, count={regime_count}/2)")
+                regime = self.current_regime  # Return current regime, not the candidate
         
         self.regime_confidence = confidence
         
-        return regime, confidence, self.regime_params[regime]
+        return regime, confidence, self.regime_params.get(regime, self.regime_params[MarketRegime.UNKNOWN])
     
     def get_regime_duration(self) -> float:
         """Get how long current regime has been active (seconds)."""

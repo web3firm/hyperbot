@@ -1573,12 +1573,17 @@ class HyperAIBot:
                     
                     # Insert trade (check 'success' key from order execution)
                     if result.get('success'):
+                        # Extract signal score (check multiple possible keys)
+                        raw_score = signal.get('signal_score', signal.get('score', signal.get('confidence', 0)))
+                        confidence_score = float(raw_score) if raw_score else 0.0
+                        logger.debug(f"📊 Signal score for DB: {confidence_score} (raw={raw_score}, keys={list(signal.keys())[:10]})")
+                        
                         trade_id = await self.db.insert_trade(
                             symbol=signal.get('symbol', self.symbol),
                             signal_type=db_signal_type,  # Use mapped BUY/SELL
                             entry_price=float(result.get('entry_price', signal.get('entry_price', 0))),
                             quantity=float(result.get('quantity', signal.get('size', 0))),
-                            confidence_score=float(signal.get('signal_score', signal.get('confidence', 0))),
+                            confidence_score=confidence_score,
                             strategy_name=signal.get('strategy'),
                             account_equity=float(self.account_value),
                             session_pnl=float(self.session_pnl),
