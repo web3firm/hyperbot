@@ -202,17 +202,17 @@ class MessageFormatter:
         
         total_pnl = 0
         for i, pos in enumerate(positions[start:end], start + 1):
-            side = pos.get('side', 'unknown').upper()
+            side = (pos.get('side') or 'unknown').upper()
             side_emoji = "🟢" if side == 'LONG' else "🔴"
             
-            pnl = pos.get('unrealized_pnl', 0)
-            pnl_pct = pos.get('unrealized_pnl_pct', 0)
+            pnl = pos.get('unrealized_pnl') or 0
+            pnl_pct = pos.get('unrealized_pnl_pct') or 0
             total_pnl += pnl
             
-            entry = pos.get('entry_price', 0)
-            current = pos.get('current_price', entry)
-            size = pos.get('size', 0)
-            leverage = pos.get('leverage', 1)
+            entry = pos.get('entry_price') or 0
+            current = pos.get('current_price') or entry
+            size = pos.get('size') or 0
+            leverage = pos.get('leverage') or 1
             
             lines.extend([
                 f"━━━ {i}. {side_emoji} {side} {pos.get('symbol', 'N/A')} ━━━",

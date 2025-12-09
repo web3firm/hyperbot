@@ -1039,18 +1039,22 @@ class TelegramBot:
             # STEP 1: Fetch candles directly from API (works for any symbol)
             candles = []
             current_price = 0
+            fetch_error = None
             
             try:
                 if hasattr(self.bot, 'client') and self.bot.client:
                     candles = self.bot.client.get_candles(symbol, interval='1m', limit=200)
+                    logger.info(f"Fetched {len(candles) if candles else 0} candles for {symbol}")
             except Exception as e:
+                fetch_error = str(e)
                 logger.warning(f"Failed to fetch candles for {symbol}: {e}")
             
             if not candles or len(candles) < 50:
+                error_detail = f"\nError: {fetch_error}" if fetch_error else ""
                 await msg.edit_text(
-                    f"❌ Could not fetch market data for *{symbol}*\n\n"
-                    f"Symbol may not exist on HyperLiquid.\n"
-                    f"Try: SOL, BTC, ETH, HYPE, etc.",
+                    f"❌ Could not fetch market data for {symbol}\n\n"
+                    f"Symbol may not exist on HyperLiquid.{error_detail}\n"
+                    f"Try: SOL, BTC, ETH, etc.",
                     parse_mode='Markdown'
                 )
                 return
@@ -1254,10 +1258,13 @@ class TelegramBot:
                 lines.append("═══════ PENALTIES ═══════")
                 if long_penalties:
                     for p in long_penalties:
-                        lines.append(f"🟢 ⛔ {p['type']}: {p['score']}")
+                        # Escape underscores in penalty types to avoid markdown issues
+                        ptype = str(p.get('type', 'unknown')).replace('_', ' ')
+                        lines.append(f"🟢 ⛔ {ptype}: {p.get('score', 0)}")
                 if short_penalties:
                     for p in short_penalties:
-                        lines.append(f"🔴 ⛔ {p['type']}: {p['score']}")
+                        ptype = str(p.get('type', 'unknown')).replace('_', ' ')
+                        lines.append(f"🔴 ⛔ {ptype}: {p.get('score', 0)}")
             
             lines.extend([
                 "",
@@ -1277,13 +1284,19 @@ class TelegramBot:
             
             lines.extend([
                 "",
-                f"_Analysis at {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}_",
+                f"Analysis at {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}",
             ])
             
-            await msg.edit_text(
-                "\n".join(filter(None, lines)),
-                parse_mode='Markdown'
-            )
+            message_text = "\n".join(filter(None, lines))
+            
+            try:
+                await msg.edit_text(message_text, parse_mode='Markdown')
+            except Exception as md_error:
+                # Fallback to plain text if markdown fails
+                logger.warning(f"Markdown parse failed, using plain text: {md_error}")
+                # Remove markdown formatting
+                plain_text = message_text.replace('*', '').replace('_', '')
+                await msg.edit_text(plain_text)
             
         except Exception as e:
             logger.error(f"Signal analysis error: {e}", exc_info=True)

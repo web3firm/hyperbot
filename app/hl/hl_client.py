@@ -337,6 +337,10 @@ class HyperLiquidClient:
             # SDK candles_snapshot requires startTime and endTime
             raw_candles = self.info.candles_snapshot(symbol, interval, start_time, now_ms)
             
+            if not raw_candles:
+                logger.warning(f"No candles returned for {symbol} - symbol may not exist")
+                return []
+            
             # Transform to standard format
             candles = []
             for c in raw_candles:
