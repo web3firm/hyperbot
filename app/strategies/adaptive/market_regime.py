@@ -222,23 +222,28 @@ class MarketRegimeDetector:
         # Only change regime if:
         # 1. It's a different regime, AND
         # 2. We've seen the same new regime at least 2 times in last 3 checks (confirmation)
+        # EXCEPTION: First regime detection (when current is UNKNOWN) doesn't need confirmation
         if regime != self.current_regime:
-            recent = list(self.regime_history)[-3:] if len(self.regime_history) >= 3 else list(self.regime_history)
-            regime_count = sum(1 for r in recent if r == regime)
-            
-            if regime_count >= 2:  # Confirmed - regime seen at least 2x in last 3 checks
+            # First detection - accept immediately if not UNKNOWN
+            if self.current_regime == MarketRegime.UNKNOWN and regime != MarketRegime.UNKNOWN:
                 old_regime = self.current_regime
                 self.current_regime = regime
                 self.regime_start_time = datetime.now(timezone.utc)
-                # Only log as "change" if we had a real previous regime (not initial detection)
-                if old_regime and old_regime != MarketRegime.UNKNOWN:
+                logger.info(f"📊 Initial regime detected: {regime.value} (confidence: {confidence:.1%})")
+            else:
+                # Subsequent changes need confirmation
+                recent = list(self.regime_history)[-3:] if len(self.regime_history) >= 3 else list(self.regime_history)
+                regime_count = sum(1 for r in recent if r == regime)
+                
+                if regime_count >= 2:  # Confirmed - regime seen at least 2x in last 3 checks
+                    old_regime = self.current_regime
+                    self.current_regime = regime
+                    self.regime_start_time = datetime.now(timezone.utc)
                     logger.info(f"🔄 Regime changed: {old_regime.value} → {regime.value} (confidence: {confidence:.1%})")
                 else:
-                    logger.info(f"📊 Initial regime detected: {regime.value} (confidence: {confidence:.1%})")
-            else:
-                # Not confirmed yet - keep current regime but log at debug level
-                logger.debug(f"📊 Regime candidate: {regime.value} (awaiting confirmation, count={regime_count}/2)")
-                regime = self.current_regime  # Return current regime, not the candidate
+                    # Not confirmed yet - keep current regime but log at debug level
+                    logger.debug(f"📊 Regime candidate: {regime.value} (awaiting confirmation, count={regime_count}/2)")
+                    regime = self.current_regime  # Return current regime, not the candidate
         
         self.regime_confidence = confidence
         

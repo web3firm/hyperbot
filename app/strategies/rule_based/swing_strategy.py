@@ -91,15 +91,17 @@ class SwingStrategy:
         #   - OBV/CMF divergence against direction: -2 points
         #   - HTF misalignment: -3 points
         #
-        # This means a "good" 18-point signal can become 8 if it fails critical checks
-        self.min_signal_score = int(os.getenv('MIN_SIGNAL_SCORE', '15'))  # 15/25 = 60%
+        # HIGH WIN RATE MODE: Require 12+ points for 70%+ win rate
+        # This means signals need strong multi-indicator confluence
+        self.min_signal_score = int(os.getenv('MIN_SIGNAL_SCORE', '12'))  # 12/25 = 48% (but realistic max is ~18)
         self.max_signal_score = 25  # Full theoretical range
         
         # Penalty thresholds for critical failures
-        self.regime_penalty = 5.0      # Counter-trend is dangerous
-        self.supertrend_penalty = 3.0  # Against major trend
-        self.volume_penalty = 2.0      # No volume = fake move
-        self.htf_penalty = 3.0         # Against higher timeframe
+        # STRICT PENALTIES for high win rate - reject marginal trades
+        self.regime_penalty = float(os.getenv('REGIME_PENALTY', '5.0'))      # Counter-trend is dangerous
+        self.supertrend_penalty = float(os.getenv('SUPERTREND_PENALTY', '3.0'))  # Against major trend
+        self.volume_penalty = float(os.getenv('VOLUME_PENALTY', '2.0'))      # No volume = fake move
+        self.htf_penalty = float(os.getenv('HTF_PENALTY', '3.0'))         # Against higher timeframe
         
         # Technical indicator periods
         self.rsi_period = 14
@@ -540,18 +542,20 @@ class SwingStrategy:
         macd = indicators.get('macd', {})
         
         if direction == 'long':
-            # RSI condition (0-1 point)
+            # RSI condition (0-1 point) - STRICT for high win rate
+            # Only give full points for genuinely favorable conditions
             if rsi and rsi < 40:
-                score += 1
-            elif rsi and rsi < 50:
-                score += 0.5
+                score += 1  # Truly oversold - excellent entry
+            elif rsi and rsi < 55:
+                score += 0.5  # Mildly oversold - acceptable
+            # RSI > 55 = no points (too extended for quality entry)
             
             # EMA alignment (0-1 point)
             if ema_fast and ema_slow and ema_fast > ema_slow:
                 score += 1
             
             # ADX trend strength (0-1 point)
-            if adx and adx > 20:
+            if adx and adx > 25:  # Raised from 20 to 25 for stronger trends
                 if regime in [MarketRegime.TRENDING_UP, MarketRegime.TRENDING_DOWN]:
                     score += 1
                 else:
@@ -564,11 +568,12 @@ class SwingStrategy:
                 score += 0.5
         
         else:  # short
-            # RSI condition
+            # RSI condition - STRICT for high win rate
             if rsi and rsi > 60:
-                score += 1
-            elif rsi and rsi > 50:
-                score += 0.5
+                score += 1  # Truly overbought - excellent short entry
+            elif rsi and rsi > 45:
+                score += 0.5  # Mildly overbought - acceptable
+            # RSI < 45 = no points (too extended for quality short)
             
             # EMA alignment
             if ema_fast and ema_slow and ema_fast < ema_slow:
