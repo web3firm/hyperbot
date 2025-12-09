@@ -267,7 +267,11 @@ class TelegramBot:
                     parse_mode=parse_mode,
                 )
         except TelegramError as e:
-            logger.error(f"Message error: {e}")
+            # Ignore "message not modified" error - it's harmless
+            if "not modified" in str(e).lower():
+                pass  # Silent ignore
+            else:
+                logger.error(f"Message error: {e}")
     
     def _can_send(self, msg_type: str) -> bool:
         """Rate limiting check."""
@@ -446,29 +450,53 @@ class TelegramBot:
     async def _cmd_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /stats command."""
         try:
-            stats = self.bot.strategy.get_statistics() if hasattr(self.bot, 'strategy') else {}
+            # Get strategy stats
+            stats = {}
+            if hasattr(self.bot, 'strategy') and self.bot.strategy:
+                stats = self.bot.strategy.get_statistics() if hasattr(self.bot.strategy, 'get_statistics') else {}
             
             lines = [
                 "📊 *PERFORMANCE STATISTICS*",
                 "",
-                "─────── Strategy ────────",
+                "─────── Session ────────",
+                f"Trades Executed: {getattr(self.bot, 'trades_executed', 0)}",
+                f"Session P&L: {self.fmt.format_money(getattr(self.bot, 'session_pnl', 0), sign=True)}",
+                f"Uptime: {self.fmt.format_uptime(self.session_start)}",
+                "",
+                "─────── Strategy ───────",
             ]
             
-            for name, data in stats.get('strategy_breakdown', {}).items():
-                lines.append(f"{name}: {data.get('signals', 0)} signals, {data.get('trades', 0)} trades")
+            # Add strategy breakdown
+            breakdown = stats.get('strategy_breakdown', {})
+            if breakdown:
+                for name, data in breakdown.items():
+                    sig_count = data.get('signals', 0)
+                    trade_count = data.get('trades', 0)
+                    lines.append(f"{name}: {sig_count} signals, {trade_count} trades")
+            else:
+                lines.append("No strategy stats available")
             
             lines.extend([
                 "",
-                "─────── Execution ───────",
+                "─────── Totals ────────",
                 f"Total Signals: {stats.get('total_signals', 0)}",
-                f"Executed:      {stats.get('total_trades', 0)}",
-                f"Rate:          {self.fmt.format_percent(stats.get('execution_rate', 0) * 100)}",
-                "",
-                f"Uptime: {self.fmt.format_uptime(self.session_start)}",
+                f"Executed: {stats.get('total_trades', 0)}",
+                f"Rate: {self.fmt.format_percent(stats.get('execution_rate', 0) * 100)}",
             ])
+            
+            # Add kill switch stats if available
+            if hasattr(self.bot, 'kill_switch') and self.bot.kill_switch:
+                ks = self.bot.kill_switch
+                lines.extend([
+                    "",
+                    "─────── Kill Switch ─────",
+                    f"Consecutive Losses: {getattr(ks, 'consecutive_losses', 0)}",
+                    f"Trading Allowed: {'✅' if getattr(ks, 'trading_allowed', True) else '❌'}",
+                ])
             
             await self._edit_or_reply(update, "\n".join(lines), self.kb.quick_actions())
         except Exception as e:
+            logger.error(f"Stats error: {e}", exc_info=True)
             await self._edit_or_reply(
                 update,
                 self.fmt.format_error("Stats Error", str(e)),
@@ -657,108 +685,83 @@ class TelegramBot:
                 Path(f"/home/hyperbot/logs/bot_{log_date}.log"),
                 Path(__file__).parent.parent.parent / f"logs/bot_{log_date}.log",
                 Path(__file__).parent.parent.parent / "logs/bot.log",
+                Path("/workspaces/hyperbot/logs/bot.log"),
             ]
             
-            log_file = None
-            lines = []
+            log_lines = []
+            log_source = "unknown"
             
             # Try to find log file
             for path in log_paths:
-                if path.exists():
-                    log_file = path
-                    try:
-                        with open(log_file, 'r', errors='ignore') as f:
-                            lines = f.readlines()[-100:]
-                    except (IOError, OSError):
-                        pass
-                    break
+                try:
+                    if path.exists():
+                        with open(path, 'r', errors='ignore') as f:
+                            log_lines = f.readlines()[-100:]
+                        if log_lines:
+                            log_source = str(path)
+                            break
+                except Exception:
+                    continue
             
             # If no log file, try pm2 logs
-            if not lines:
+            if not log_lines:
                 try:
                     result = subprocess.run(
                         ['pm2', 'logs', 'hyperbot', '--lines', '30', '--nostream'],
                         capture_output=True, text=True, timeout=5
                     )
                     if result.stdout:
-                        lines = result.stdout.strip().split('\n')
-                except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError):
+                        log_lines = result.stdout.strip().split('\n')
+                        log_source = "pm2"
+                except Exception:
                     pass
             
-            if not lines:
+            if not log_lines:
                 message = (
                     "📝 *RECENT LOGS*\n\n"
                     "📭 No logs available.\n\n"
-                    "_Use `pm2 logs hyperbot` on VPS._"
+                    "Use pm2 logs hyperbot on VPS."
                 )
-                await self._edit_or_reply(update, message, self.kb.back_to_menu())
+                await self._edit_or_reply(update, message, self.kb.logs_actions())
                 return
             
+            # Format logs - simplified approach
             formatted = []
-            for line in lines[-50:]:
+            for line in log_lines[-30:]:
                 line = line.strip()
                 if not line:
                     continue
                 
-                # Determine emoji based on content
+                # Simple emoji based on content
                 if 'ERROR' in line or 'error' in line.lower():
                     emoji = "❌"
                 elif 'WARNING' in line or 'warning' in line.lower():
                     emoji = "⚠️"
                 elif 'Signal' in line or 'SIGNAL' in line:
                     emoji = "📡"
-                elif 'Trade' in line or 'TRADE' in line or 'Order' in line:
+                elif 'Trade' in line or 'Order' in line:
                     emoji = "💹"
-                elif 'Position' in line or 'POSITION' in line:
-                    emoji = "📊"
-                elif 'Candle' in line or 'candle' in line:
-                    emoji = "🕯️"
-                elif 'WebSocket' in line or 'websocket' in line:
-                    emoji = "🔌"
-                elif 'INFO' in line:
-                    emoji = "ℹ️"
                 else:
-                    emoji = "📋"
+                    emoji = "📝"
                 
-                # Extract time and message
-                # Handle PM2 format: "0|hyperbot  | 2025-12-07 13:40:17 +03:00: message"
-                if '|' in line and ':' in line:
-                    parts = line.split('|')
-                    if len(parts) >= 3:
-                        msg_part = '|'.join(parts[2:]).strip()
-                        # Extract time from PM2 format
-                        if msg_part.startswith('20'):
-                            time_end = msg_part.find(': ')
-                            if time_end > 0:
-                                time_str = msg_part[11:19]  # HH:MM:SS
-                                msg = msg_part[time_end+2:][:60]
-                                formatted.append(f"{emoji} `{time_str}` {msg}")
-                                continue
-                
-                # Handle standard format: "2025-12-07 13:40:17 - Module - LEVEL - message"
-                if ' - ' in line:
-                    parts = line.split(' - ')
-                    if len(parts) >= 4:
-                        time_parts = parts[0].split(' ')
-                        time_str = time_parts[1].split(',')[0] if len(time_parts) > 1 else parts[0][:8]
-                        msg = parts[-1].strip()[:60]
-                        formatted.append(f"{emoji} `{time_str}` {msg}")
-                        continue
-                
-                # Raw line fallback
-                if len(line) > 10:
-                    formatted.append(f"{emoji} {line[:65]}")
+                # Truncate line for display
+                display_line = line[:80] if len(line) > 80 else line
+                # Remove characters that break markdown
+                display_line = display_line.replace('*', '').replace('_', '').replace('`', '')
+                formatted.append(f"{emoji} {display_line}")
             
-            if not formatted:
-                message = "📝 *RECENT LOGS*\n\n📭 No log entries parsed."
+            if formatted:
+                message = "📝 *RECENT LOGS*\n\n" + "\n".join(formatted[-15:])
             else:
-                message = "📝 *RECENT LOGS*\n\n" + "\n".join(formatted[-20:])
+                message = "📝 *RECENT LOGS*\n\n📭 No parseable logs."
             
             await self._edit_or_reply(update, message, self.kb.logs_actions())
+            
         except Exception as e:
+            logger.error(f"Logs error: {e}", exc_info=True)
             await self._edit_or_reply(
                 update,
-                self.fmt.format_error("Logs Error", str(e)),
+                f"❌ Logs Error: {str(e)[:100]}",
                 self.kb.back_to_menu()
             )
     

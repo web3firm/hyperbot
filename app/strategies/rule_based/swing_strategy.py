@@ -311,8 +311,9 @@ class SwingStrategy:
         self._long_score_history.append(long_enhanced)
         self._short_score_history.append(short_enhanced)
         
-        # Log both scores for visibility
-        logger.debug(f"📊 Scores: LONG={long_enhanced}/{self.max_signal_score} | SHORT={short_enhanced}/{self.max_signal_score} | Regime={regime.value}")
+        # Log scores every time for visibility (INFO level for debugging signal generation)
+        if long_enhanced > 5 or short_enhanced > 5:  # Only log if at least some score
+            logger.info(f"📊 Scores: LONG={long_enhanced}/{self.max_signal_score} | SHORT={short_enhanced}/{self.max_signal_score} | Regime={regime.value} | Threshold={self.min_signal_score}")
         
         # Determine best direction
         if long_enhanced >= self.min_signal_score and long_enhanced > short_enhanced:
