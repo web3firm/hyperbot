@@ -230,7 +230,11 @@ class MarketRegimeDetector:
                 old_regime = self.current_regime
                 self.current_regime = regime
                 self.regime_start_time = datetime.now(timezone.utc)
-                logger.info(f"🔄 Regime changed: {old_regime.value if old_regime else 'NONE'} → {regime.value} (confidence: {confidence:.1%})")
+                # Only log as "change" if we had a real previous regime (not initial detection)
+                if old_regime and old_regime != MarketRegime.UNKNOWN:
+                    logger.info(f"🔄 Regime changed: {old_regime.value} → {regime.value} (confidence: {confidence:.1%})")
+                else:
+                    logger.info(f"📊 Initial regime detected: {regime.value} (confidence: {confidence:.1%})")
             else:
                 # Not confirmed yet - keep current regime but log at debug level
                 logger.debug(f"📊 Regime candidate: {regime.value} (awaiting confirmation, count={regime_count}/2)")

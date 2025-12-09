@@ -754,7 +754,7 @@ class TelegramBot:
             else:
                 message = "📝 *RECENT LOGS*\n\n" + "\n".join(formatted[-20:])
             
-            await self._edit_or_reply(update, message, self.kb.quick_actions())
+            await self._edit_or_reply(update, message, self.kb.logs_actions())
         except Exception as e:
             await self._edit_or_reply(
                 update,
@@ -1023,7 +1023,8 @@ class TelegramBot:
                     update,
                     f"📊 *SIGNAL ANALYSIS*\n\n"
                     f"Usage: `/signal SYMBOL`\n\n"
-                    f"Available: {', '.join(symbols)}\n\n"
+                    f"Configured: {', '.join(symbols)}\n"
+                    f"(Any symbol can be analyzed)\n\n"
                     f"Example: `/signal SOL`",
                     self.kb.back_to_menu()
                 )
@@ -1031,11 +1032,42 @@ class TelegramBot:
             
             # Send "analyzing" message
             msg = await update.effective_message.reply_text(
-                f"🔍 Analyzing *{symbol}*...\n\n_Fetching candles and running strategy..._",
+                f"🔍 Analyzing *{symbol}*...\n\n_Fetching candles from API..._",
                 parse_mode='Markdown'
             )
             
-            # Get the strategy for this symbol
+            # STEP 1: Fetch candles directly from API (works for any symbol)
+            candles = []
+            current_price = 0
+            
+            try:
+                if hasattr(self.bot, 'client') and self.bot.client:
+                    candles = self.bot.client.get_candles(symbol, interval='1m', limit=200)
+            except Exception as e:
+                logger.warning(f"Failed to fetch candles for {symbol}: {e}")
+            
+            if not candles or len(candles) < 50:
+                await msg.edit_text(
+                    f"❌ Could not fetch market data for *{symbol}*\n\n"
+                    f"Symbol may not exist on HyperLiquid.\n"
+                    f"Try: SOL, BTC, ETH, HYPE, etc.",
+                    parse_mode='Markdown'
+                )
+                return
+            
+            # Get current price from candles
+            current_price = float(candles[-1].get('close', candles[-1].get('c', 0)))
+            
+            if len(candles) < 100:
+                await msg.edit_text(
+                    f"⏳ Need more data for {symbol}\n\n"
+                    f"Have {len(candles)} candles, need 100+\n"
+                    f"_Try again in a few minutes._",
+                    parse_mode='Markdown'
+                )
+                return
+            
+            # STEP 2: Get strategy (prefer symbol-specific, fallback to any swing strategy)
             strategy = None
             if hasattr(self.bot, 'multi_asset_strategies') and symbol in self.bot.multi_asset_strategies:
                 strategy = self.bot.multi_asset_strategies[symbol]
@@ -1047,58 +1079,13 @@ class TelegramBot:
                         break
             
             if not strategy:
+                # No strategy available - show basic price info
                 await msg.edit_text(
-                    f"❌ No strategy found for {symbol}",
-                    parse_mode='Markdown'
-                )
-                return
-            
-            # Get candles - try multiple sources
-            candles = []
-            current_price = 0
-            
-            # Source 1: Asset manager candle cache (multi-asset mode)
-            if hasattr(self.bot, 'asset_manager') and self.bot.asset_manager:
-                candles = self.bot.asset_manager.get_candles(symbol)
-            
-            # Source 2: Main candles cache (for single-symbol mode)
-            if not candles and hasattr(self.bot, '_candles_cache') and self.bot._candles_cache:
-                if symbol == self.bot.symbol:
-                    candles = self.bot._candles_cache
-            
-            # Source 3: Fetch from API as fallback
-            if not candles or len(candles) < 50:
-                try:
-                    if hasattr(self.bot, 'client') and self.bot.client:
-                        fetched = self.bot.client.get_candles(symbol, interval='1m', limit=200)
-                        if fetched:
-                            candles = fetched
-                            # Store in asset manager if available
-                            if hasattr(self.bot, 'asset_manager') and self.bot.asset_manager:
-                                self.bot.asset_manager.update_candles(symbol, candles)
-                except Exception as e:
-                    logger.warning(f"Failed to fetch candles for {symbol}: {e}")
-            
-            # Get current price
-            if hasattr(self.bot, 'websocket') and self.bot.websocket:
-                market_data = self.bot.websocket.get_market_data(symbol)
-                current_price = market_data.get('price', 0)
-            
-            if not current_price and candles:
-                current_price = float(candles[-1].get('close', candles[-1].get('c', 0)))
-            
-            if not candles or len(candles) < 50:
-                await msg.edit_text(
-                    f"❌ No market data available for {symbol}\n\n"
-                    f"_Bot may need time to collect candles. Try again in a minute._",
-                    parse_mode='Markdown'
-                )
-                return
-            
-            if len(candles) < 100:
-                await msg.edit_text(
-                    f"⏳ Need more data for {symbol}\n\n"
-                    f"Have {len(candles)} candles, need 100+",
+                    f"📊 *{symbol} QUICK VIEW*\n\n"
+                    f"💰 Price: ${current_price:,.4f}\n"
+                    f"📈 Candles: {len(candles)}\n\n"
+                    f"_No strategy available for full analysis._\n"
+                    f"_Bot only has strategy for configured symbols._",
                     parse_mode='Markdown'
                 )
                 return
@@ -1331,8 +1318,12 @@ class TelegramBot:
             "refresh_market": self._cmd_market,
             "stats": self._cmd_stats,
             "refresh_stats": self._cmd_stats,
+            "logs": self._cmd_logs,
+            "refresh_logs": self._cmd_logs,
             "help": self._cmd_help,
             "settings": self._cmd_alerts,
+            "settings_notifications": self._cmd_alerts,  # Settings sub-menu
+            "settings_display": self._cmd_config,  # Display settings -> show config
             "noop": lambda u, c: None,
         }
         
@@ -1366,6 +1357,23 @@ class TelegramBot:
         elif action.startswith("positions_page_"):
             page = int(action.replace("positions_page_", ""))
             await self._handle_positions_page(update, page)
+        elif action.startswith("trades_page_"):
+            # Trades pagination - just refresh trades for now
+            await self._cmd_trades(update, context)
+        elif action.startswith("auto_tpsl_"):
+            symbol = action.replace("auto_tpsl_", "")
+            await self._handle_auto_tpsl(update, symbol)
+        elif action.startswith("set_tp_price_") or action.startswith("set_sl_price_"):
+            # Handle price selection from keyboard (format: set_tp_price_SYMBOL_PRICE)
+            await self._handle_price_selection(update, action)
+        else:
+            # Unknown callback - log it
+            logger.warning(f"Unknown callback action: {action}")
+            await self._edit_or_reply(
+                update,
+                f"⚠️ Unknown action: {action}",
+                self.kb.back_to_menu()
+            )
     
     async def _handle_bot_start(self, update: Update):
         """Handle bot start button."""
@@ -1534,6 +1542,115 @@ class TelegramBot:
             await self._edit_or_reply(
                 update,
                 self.fmt.format_error("Positions Error", str(e)),
+                self.kb.back_to_menu()
+            )
+    
+    async def _handle_auto_tpsl(self, update: Update, symbol: str):
+        """Handle auto TP/SL setting based on ATR."""
+        try:
+            import os
+            from decimal import Decimal
+            
+            # Get current position
+            positions = await self._get_positions()
+            pos = next((p for p in positions if p.get('symbol') == symbol), None)
+            
+            if not pos:
+                await self._edit_or_reply(update, f"❌ No position found for {symbol}", self.kb.back_to_menu())
+                return
+            
+            # Get ATR from strategy if available
+            atr = None
+            if hasattr(self.bot, 'multi_asset_strategies') and symbol in self.bot.multi_asset_strategies:
+                strategy = self.bot.multi_asset_strategies[symbol]
+                if hasattr(strategy, '_calculate_indicators'):
+                    candles = []
+                    if hasattr(self.bot, 'asset_manager'):
+                        candles = self.bot.asset_manager.get_candles(symbol)
+                    if candles:
+                        indicators = strategy._calculate_indicators(candles)
+                        atr = indicators.get('atr')
+            
+            if not atr:
+                await self._edit_or_reply(
+                    update, 
+                    f"⚠️ Cannot calculate ATR for {symbol}. Use manual TP/SL.",
+                    self.kb.position_detail(symbol)
+                )
+                return
+            
+            # Calculate TP/SL based on ATR
+            entry = Decimal(str(pos.get('entry_price', 0)))
+            atr_val = Decimal(str(atr))
+            sl_mult = Decimal(os.getenv('ATR_SL_MULTIPLIER', '2.0'))
+            tp_mult = Decimal(os.getenv('ATR_TP_MULTIPLIER', '3.5'))
+            
+            is_long = pos.get('side', '').lower() == 'long'
+            if is_long:
+                sl_price = float(entry - (atr_val * sl_mult))
+                tp_price = float(entry + (atr_val * tp_mult))
+            else:
+                sl_price = float(entry + (atr_val * sl_mult))
+                tp_price = float(entry - (atr_val * tp_mult))
+            
+            # Set TP/SL
+            result = self.bot.order_manager.set_position_tpsl(symbol=symbol, sl_price=sl_price, tp_price=tp_price)
+            
+            if result.get('status') == 'ok':
+                await self._edit_or_reply(
+                    update,
+                    f"✅ *AUTO TP/SL SET*\n\n{symbol}\n🛑 SL: ${sl_price:.4f}\n🎯 TP: ${tp_price:.4f}",
+                    self.kb.back_to_menu()
+                )
+            else:
+                await self._edit_or_reply(
+                    update,
+                    self.fmt.format_error("Auto TP/SL Failed", str(result)),
+                    self.kb.back_to_menu()
+                )
+        except Exception as e:
+            await self._edit_or_reply(
+                update,
+                self.fmt.format_error("Auto TP/SL Error", str(e)),
+                self.kb.back_to_menu()
+            )
+    
+    async def _handle_price_selection(self, update: Update, action: str):
+        """Handle price selection from inline keyboard."""
+        try:
+            # Parse action: set_tp_price_SYMBOL_PRICE or set_sl_price_SYMBOL_PRICE
+            parts = action.split('_')
+            if len(parts) < 5:
+                await self._edit_or_reply(update, "❌ Invalid price action", self.kb.back_to_menu())
+                return
+            
+            action_type = parts[1]  # tp or sl
+            symbol = parts[3]
+            price = float(parts[4])
+            
+            if action_type == 'tp':
+                result = self.bot.order_manager.set_position_tpsl(symbol=symbol, tp_price=price)
+                label = "TAKE PROFIT"
+            else:
+                result = self.bot.order_manager.set_position_tpsl(symbol=symbol, sl_price=price)
+                label = "STOP LOSS"
+            
+            if result.get('status') == 'ok':
+                await self._edit_or_reply(
+                    update,
+                    f"✅ *{label} SET*\n\n{symbol}: ${price:.4f}",
+                    self.kb.back_to_menu()
+                )
+            else:
+                await self._edit_or_reply(
+                    update,
+                    self.fmt.format_error(f"Set {label} Failed", str(result)),
+                    self.kb.back_to_menu()
+                )
+        except Exception as e:
+            await self._edit_or_reply(
+                update,
+                self.fmt.format_error("Price Selection Error", str(e)),
                 self.kb.back_to_menu()
             )
     

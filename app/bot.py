@@ -1396,6 +1396,11 @@ class HyperAIBot:
                         else:
                             logger.info(f"🚫 Signal rejected: {rejection_reason}")
                     
+                    # Reset transient error counter on successful iteration
+                    if hasattr(self, '_transient_error_count') and self._transient_error_count > 0:
+                        logger.info(f"✅ API connection restored after {self._transient_error_count} transient errors")
+                        self._transient_error_count = 0
+                    
                     # Log status every 100 loops
                     if loop_count % 100 == 0:
                         logger.info(f"📊 Loop #{loop_count} - Trades: {self.trades_executed} - P&L: ${self.session_pnl:+.2f}")
@@ -1404,13 +1409,43 @@ class HyperAIBot:
                     await asyncio.sleep(1)
                     
                 except Exception as e:
-                    logger.error(f"❌ Loop error: {e}", exc_info=True)
+                    error_str = str(e).lower()
                     
-                    # Notify via error handler
-                    if self.error_handler:
-                        await self.error_handler.handle_critical_error(e, "Trading Loop Iteration")
+                    # Check if this is a transient/server error (502, 503, 504, timeout, etc.)
+                    is_transient = any(pattern in error_str for pattern in [
+                        '502', '503', '504', '520', '521', '522', '523', '524',
+                        'bad gateway', 'service unavailable', 'gateway timeout',
+                        'connection reset', 'connection refused', 'timeout',
+                        'temporarily unavailable', 'rate limit'
+                    ])
                     
-                    await asyncio.sleep(5)
+                    if is_transient:
+                        # Increment transient error counter
+                        if not hasattr(self, '_transient_error_count'):
+                            self._transient_error_count = 0
+                        self._transient_error_count += 1
+                        
+                        # Progressive backoff: 5s, 10s, 30s, 60s max
+                        backoff_seconds = min(60, 5 * (2 ** min(3, self._transient_error_count // 5)))
+                        
+                        logger.warning(f"⚠️ Transient error #{self._transient_error_count}: {e} - sleeping {backoff_seconds}s")
+                        
+                        # Only alert every 10 transient errors
+                        if self.error_handler and self._transient_error_count % 10 == 0:
+                            await self.error_handler.handle_transient_error(e, "Trading Loop - API Outage")
+                        
+                        await asyncio.sleep(backoff_seconds)
+                    else:
+                        # Reset transient counter on non-transient error
+                        self._transient_error_count = 0
+                        
+                        logger.error(f"❌ Loop error: {e}", exc_info=True)
+                        
+                        # Notify via error handler for real errors
+                        if self.error_handler:
+                            await self.error_handler.handle_critical_error(e, "Trading Loop Iteration")
+                        
+                        await asyncio.sleep(5)
         
         finally:
             # Stop Position Manager monitoring

@@ -54,6 +54,17 @@ class KeyboardFactory:
         return InlineKeyboardMarkup(keyboard)
     
     @staticmethod
+    def logs_actions() -> InlineKeyboardMarkup:
+        """Create logs keyboard with proper refresh."""
+        keyboard = [
+            [
+                InlineKeyboardButton("🔄 Refresh Logs", callback_data="refresh_logs"),
+                InlineKeyboardButton("🏠 Menu", callback_data="main_menu"),
+            ],
+        ]
+        return InlineKeyboardMarkup(keyboard)
+    
+    @staticmethod
     def back_to_menu() -> InlineKeyboardMarkup:
         """Create back to menu keyboard."""
         keyboard = [
