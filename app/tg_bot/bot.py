@@ -1835,6 +1835,11 @@ class TelegramBot:
         if not self.notify_fills or not self._can_send('fill'):
             return
         
+        # Defensive: ensure fill is a dict
+        if not isinstance(fill, dict):
+            logger.warning(f"notify_fill received non-dict: {type(fill)}")
+            return
+        
         message = self.fmt.format_fill_notification(fill)
         await self.send_message(message)
     

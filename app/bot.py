@@ -1435,13 +1435,14 @@ class HyperAIBot:
                                 # Send Telegram notification for successful fill
                                 if self.telegram_bot:
                                     try:
-                                        await self.telegram_bot.notify_fill(
-                                            'entry',
-                                            signal['symbol'],
-                                            signal['side'],
-                                            signal['entry_price'],
-                                            signal['size']
-                                        )
+                                        fill_data = {
+                                            'symbol': signal['symbol'],
+                                            'side': signal['side'],
+                                            'price': signal['entry_price'],
+                                            'size': signal['size'],
+                                            'closed_pnl': 0  # Entry, no P&L yet
+                                        }
+                                        await self.telegram_bot.notify_fill(fill_data)
                                     except Exception:
                                         pass
                                 

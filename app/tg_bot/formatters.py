@@ -417,6 +417,10 @@ class MessageFormatter:
     @classmethod
     def format_fill_notification(cls, fill: Dict[str, Any]) -> str:
         """Format trade fill notification."""
+        # Defensive: ensure fill is a dict
+        if not isinstance(fill, dict):
+            return f"⚠️ Invalid fill format: {type(fill)}"
+        
         side = fill.get('side', 'buy').upper()
         side_emoji = "🟢" if side == 'BUY' or side == 'B' else "🔴"
         
