@@ -586,6 +586,15 @@ class HyperAIBot:
         Triggers indicator recalculation on new candle
         Supports multi-asset mode
         """
+        # Handle case where symbol or candle might be wrong type
+        if isinstance(symbol, dict):
+            # Data came in wrong order, try to extract
+            candle = symbol
+            symbol = candle.get('s', candle.get('coin', self.symbol)) if isinstance(candle, dict) else self.symbol
+        if isinstance(candle, str):
+            logger.debug(f"Received string candle: {candle[:50]}")
+            return
+            
         # Multi-asset mode: update the specific asset's cache
         if self.multi_asset_mode and self.asset_manager:
             if symbol in self.multi_assets:
@@ -619,8 +628,27 @@ class HyperAIBot:
         Sends instant Telegram notifications when orders fill/cancel/trigger
         """
         try:
+            # Handle case where update might be a string or have nested data
+            if isinstance(update, str):
+                logger.debug(f"Received string order update: {update[:100]}")
+                return
+            if not isinstance(update, dict):
+                logger.debug(f"Received non-dict order update: {type(update)}")
+                return
+            
+            # Extract data from nested structure if needed
+            if 'data' in update:
+                update = update.get('data', {})
+                if isinstance(update, list) and len(update) > 0:
+                    update = update[0]
+            
+            if not isinstance(update, dict):
+                return
+                
             status = update.get('status')
             order = update.get('order', {})
+            if isinstance(order, str):
+                order = {}
             
             coin = order.get('coin', 'UNKNOWN')
             side = order.get('side', 'unknown')
@@ -664,6 +692,23 @@ class HyperAIBot:
         Called when orders are filled on the exchange
         """
         try:
+            # Handle case where fill might be a string or have nested data
+            if isinstance(fill, str):
+                logger.debug(f"Received string fill: {fill[:100]}")
+                return
+            if not isinstance(fill, dict):
+                logger.debug(f"Received non-dict fill: {type(fill)}")
+                return
+            
+            # Extract data from nested structure if needed
+            if 'data' in fill:
+                fill = fill.get('data', {})
+                if isinstance(fill, list) and len(fill) > 0:
+                    fill = fill[0]
+            
+            if not isinstance(fill, dict):
+                return
+                
             coin = fill.get('coin', 'UNKNOWN')
             side = fill.get('side', 'unknown')
             size = fill.get('sz', 0)
