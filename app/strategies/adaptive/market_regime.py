@@ -212,9 +212,33 @@ class MarketRegimeDetector:
                 regime = MarketRegime.RANGING
                 confidence = min(0.8, 0.6 + (self.adx_trending_threshold - adx_val) / 50)
         
-        # Default to UNKNOWN with low confidence
+        # FALLBACK: If still UNKNOWN, default to RANGING with lower confidence
+        # This prevents the bot from being stuck in UNKNOWN which blocks all trading
         if regime == MarketRegime.UNKNOWN:
-            confidence = 0.3
+            # Use a sensible fallback based on available data
+            if adx_val > 0:
+                if adx_val > self.adx_trending_threshold * 0.7:
+                    # Borderline trending - pick direction based on EMAs/price
+                    if ema_fast and ema_slow:
+                        if float(ema_fast) > float(ema_slow):
+                            regime = MarketRegime.TRENDING_UP
+                        else:
+                            regime = MarketRegime.TRENDING_DOWN
+                    else:
+                        prices = [Decimal(str(c.get('close', c.get('c', 0)))) for c in candles[-20:]]
+                        if prices[-1] > prices[0]:
+                            regime = MarketRegime.TRENDING_UP
+                        else:
+                            regime = MarketRegime.TRENDING_DOWN
+                    confidence = 0.4  # Lower confidence for borderline
+                else:
+                    # Default to ranging in uncertain conditions
+                    regime = MarketRegime.RANGING
+                    confidence = 0.4
+            else:
+                # No ADX data - default to ranging
+                regime = MarketRegime.RANGING
+                confidence = 0.3
         
         # Update state with CONFIRMATION to prevent rapid flip-flopping
         self.regime_history.append(regime)
