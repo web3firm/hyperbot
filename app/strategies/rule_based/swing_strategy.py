@@ -1035,36 +1035,45 @@ class SwingStrategy:
         if len(prices) < period + 1:
             return None
         
-        current_change = prices[-1] - prices[-2]
+        # Ensure prices are Decimal
+        decimal_prices = [Decimal(str(p)) if not isinstance(p, Decimal) else p for p in prices]
+        period_dec = Decimal(str(period))
+        
+        current_change = decimal_prices[-1] - decimal_prices[-2]
         current_gain = max(current_change, Decimal('0'))
         current_loss = abs(min(current_change, Decimal('0')))
         
         if self.rsi_avg_gain is None:
-            changes = [prices[i] - prices[i-1] for i in range(-period, 0)]
+            changes = [decimal_prices[i] - decimal_prices[i-1] for i in range(-period, 0)]
             gains = [max(c, Decimal('0')) for c in changes]
             losses = [abs(min(c, Decimal('0'))) for c in changes]
-            self.rsi_avg_gain = sum(gains) / period
-            self.rsi_avg_loss = sum(losses) / period
+            self.rsi_avg_gain = sum(gains) / period_dec
+            self.rsi_avg_loss = sum(losses) / period_dec
         else:
-            self.rsi_avg_gain = (self.rsi_avg_gain * (period - 1) + current_gain) / period
-            self.rsi_avg_loss = (self.rsi_avg_loss * (period - 1) + current_loss) / period
+            self.rsi_avg_gain = (self.rsi_avg_gain * (period_dec - Decimal('1')) + current_gain) / period_dec
+            self.rsi_avg_loss = (self.rsi_avg_loss * (period_dec - Decimal('1')) + current_loss) / period_dec
         
         if self.rsi_avg_loss == 0:
             return Decimal('100')
         
         rs = self.rsi_avg_gain / self.rsi_avg_loss
-        return 100 - (100 / (1 + rs))
+        return Decimal('100') - (Decimal('100') / (Decimal('1') + rs))
     
     def _calculate_ema(self, prices: List[Decimal], period: int) -> Optional[Decimal]:
         """Calculate EMA."""
         if len(prices) < period:
             return None
         
-        multiplier = Decimal('2') / (period + 1)
-        ema = sum(prices[:period]) / period
+        # Ensure all arithmetic uses Decimal to avoid float/Decimal mixing
+        multiplier = Decimal('2') / Decimal(str(period + 1))
         
-        for price in prices[period:]:
-            ema = (price * multiplier) + (ema * (1 - multiplier))
+        # Ensure prices are all Decimal
+        decimal_prices = [Decimal(str(p)) if not isinstance(p, Decimal) else p for p in prices]
+        
+        ema = sum(decimal_prices[:period]) / Decimal(str(period))
+        
+        for price in decimal_prices[period:]:
+            ema = (price * multiplier) + (ema * (Decimal('1') - multiplier))
         
         return ema
     
@@ -1147,17 +1156,18 @@ class SwingStrategy:
         if len(tr_list) < period:
             return None
         
-        atr = sum(tr_list[-period:]) / period
-        plus_dm = sum(plus_dm_list[-period:]) / period
-        minus_dm = sum(minus_dm_list[-period:]) / period
+        period_dec = Decimal(str(period))
+        atr = sum(tr_list[-period:]) / period_dec
+        plus_dm = sum(plus_dm_list[-period:]) / period_dec
+        minus_dm = sum(minus_dm_list[-period:]) / period_dec
         
-        plus_di = (plus_dm / atr * 100) if atr > 0 else Decimal('0')
-        minus_di = (minus_dm / atr * 100) if atr > 0 else Decimal('0')
+        plus_di = (plus_dm / atr * Decimal('100')) if atr > 0 else Decimal('0')
+        minus_di = (minus_dm / atr * Decimal('100')) if atr > 0 else Decimal('0')
         
         di_sum = plus_di + minus_di
         di_diff = abs(plus_di - minus_di)
         
-        return (di_diff / di_sum * 100) if di_sum > 0 else Decimal('0')
+        return (di_diff / di_sum * Decimal('100')) if di_sum > 0 else Decimal('0')
     
     def _calculate_atr(self, candles: List[Dict], period: int = 14) -> Optional[Decimal]:
         """Calculate ATR."""
