@@ -25,6 +25,31 @@ logger = TradingLogger("hl_order_manager")
 Grouping = Literal["na", "normalTpsl", "positionTpsl"]
 
 
+def _safe_get_statuses(result: Any) -> List[Dict]:
+    """
+    Safely extract statuses from SDK response.
+    Handles cases where SDK returns string instead of dict.
+    
+    Args:
+        result: SDK response (may be dict, string, or other)
+        
+    Returns:
+        List of status dicts, or empty list if not extractable
+    """
+    if not isinstance(result, dict):
+        return []
+    response = result.get('response')
+    if not isinstance(response, dict):
+        return []
+    data = response.get('data')
+    if not isinstance(data, dict):
+        return []
+    statuses = data.get('statuses')
+    if not isinstance(statuses, list):
+        return []
+    return statuses
+
+
 class HLOrderManager:
     """Ultra-lean order manager using direct SDK calls."""
     
@@ -392,7 +417,7 @@ class HLOrderManager:
             result = self.limit_order_alo(symbol, is_buy, remaining_size, chase_price)
             
             # Check for fill
-            statuses = result.get('response', {}).get('data', {}).get('statuses', [])
+            statuses = _safe_get_statuses(result)
             if statuses:
                 status = statuses[0]
                 if 'filled' in status:
@@ -430,7 +455,7 @@ class HLOrderManager:
             market_result = self.market_open(symbol, is_buy, remaining_size)
             
             # Update fill info
-            statuses = market_result.get('response', {}).get('data', {}).get('statuses', [])
+            statuses = _safe_get_statuses(market_result)
             if statuses and 'filled' in statuses[0]:
                 fill = statuses[0]['filled']
                 filled_size += float(fill.get('totalSz', 0))
@@ -490,7 +515,7 @@ class HLOrderManager:
                     cloid=self._gen_cloid(),
                 )
                 # Check for error in response
-                statuses = tp_result.get('response', {}).get('data', {}).get('statuses', [])
+                statuses = _safe_get_statuses(tp_result)
                 if statuses and 'error' in statuses[0]:
                     logger.error(f"❌ TP order error: {statuses[0]['error']}")
                     results.append({'type': 'tp', 'error': statuses[0]['error']})
@@ -522,7 +547,7 @@ class HLOrderManager:
                     cloid=self._gen_cloid(),
                 )
                 # Check for error in response
-                statuses = sl_result.get('response', {}).get('data', {}).get('statuses', [])
+                statuses = _safe_get_statuses(sl_result)
                 if statuses and 'error' in statuses[0]:
                     logger.error(f"❌ SL order error: {statuses[0]['error']}")
                     results.append({'type': 'sl', 'error': statuses[0]['error']})
@@ -912,14 +937,28 @@ class HLOrderManager:
         else:
             entry_result = self.market_open(symbol, is_buy, size, slippage)
         
+        # DEFENSIVE: Ensure entry_result is a dict (SDK may return string on error)
+        if isinstance(entry_result, str):
+            logger.error(f"Entry returned string instead of dict: {entry_result[:200]}")
+            return {'status': 'error', 'message': entry_result, 'error': entry_result}
+        if not isinstance(entry_result, dict):
+            logger.error(f"Entry returned unexpected type: {type(entry_result)}")
+            return {'status': 'error', 'message': str(entry_result), 'error': str(entry_result)}
+        
         # Check if entry succeeded
         entry_ok = entry_result.get('status') == 'ok' or 'response' in entry_result
         if not entry_ok:
             logger.error(f"Entry failed: {entry_result}")
             return entry_result
         
-        # Check for actual fill in response
-        statuses = entry_result.get('response', {}).get('data', {}).get('statuses', [])
+        # Check for actual fill in response - with defensive dict access
+        response = entry_result.get('response', {})
+        if isinstance(response, str):
+            response = {}
+        data = response.get('data', {}) if isinstance(response, dict) else {}
+        if isinstance(data, str):
+            data = {}
+        statuses = data.get('statuses', []) if isinstance(data, dict) else []
         if statuses and 'error' in statuses[0]:
             logger.error(f"Entry error: {statuses[0]['error']}")
             return {'status': 'error', 'message': statuses[0]['error']}
@@ -996,7 +1035,10 @@ class HLOrderManager:
         # Get actual entry price from fill or use provided entry
         actual_entry = entry_float
         entry_data = result.get('entry', {})
-        statuses = entry_data.get('response', {}).get('data', {}).get('statuses', [])
+        if isinstance(entry_data, dict):
+            statuses = _safe_get_statuses(entry_data)
+        else:
+            statuses = []
         if statuses and 'filled' in statuses[0]:
             filled_info = statuses[0]['filled']
             actual_entry = float(filled_info.get('avgPx', entry_float or 0))
