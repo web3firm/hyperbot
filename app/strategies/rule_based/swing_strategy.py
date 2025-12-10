@@ -1183,7 +1183,7 @@ class SwingStrategy:
             tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
             tr_list.append(tr)
         
-        return sum(tr_list[-period:]) / period
+        return sum(tr_list[-period:]) / Decimal(str(period))
     
     def _calculate_bb_bandwidth(self, prices: List[Decimal], period: int = 20) -> Optional[Decimal]:
         """Calculate Bollinger Band bandwidth."""
@@ -1191,8 +1191,9 @@ class SwingStrategy:
             return None
         
         recent = prices[-period:]
-        sma = sum(recent) / period
-        variance = sum((p - sma) ** 2 for p in recent) / period
+        period_dec = Decimal(str(period))
+        sma = sum(recent) / period_dec
+        variance = sum((p - sma) ** 2 for p in recent) / period_dec
         std = variance ** Decimal('0.5')
         
         upper = sma + (std * 2)
