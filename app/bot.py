@@ -1606,6 +1606,16 @@ class HyperAIBot:
     async def log_trade_for_ai(self, signal: Dict, result: Dict, market_data: Dict):
         """Log trade data for AI training"""
         try:
+            # Defensive: ensure signal and result are dicts
+            if not isinstance(signal, dict):
+                logger.warning(f"log_trade_for_ai: signal is not a dict: {type(signal)}")
+                return
+            if not isinstance(result, dict):
+                logger.warning(f"log_trade_for_ai: result is not a dict: {type(result)}")
+                return
+            if not isinstance(market_data, dict):
+                market_data = {}
+            
             # Convert signal Decimals to float for JSON serialization
             safe_signal = {}
             for k, v in signal.items():

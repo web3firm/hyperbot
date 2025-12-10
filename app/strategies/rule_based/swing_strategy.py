@@ -1245,6 +1245,14 @@ class SwingStrategy:
             signal: The signal that was executed
             result: The execution result from the order manager
         """
+        # Defensive: ensure signal and result are dicts
+        if not isinstance(signal, dict):
+            logger.warning(f"record_trade_execution: signal is not a dict: {type(signal)}")
+            return
+        if not isinstance(result, dict):
+            logger.warning(f"record_trade_execution: result is not a dict: {type(result)}")
+            return
+        
         # Track execution
         success = result.get('success', False) or result.get('status') == 'ok'
         

@@ -242,8 +242,25 @@ class TelegramBot:
             )
             return True
         except TelegramError as e:
-            logger.error(f"Telegram send error: {e}")
-            return False
+            if "parse entities" in str(e).lower() or "can't find end" in str(e).lower():
+                # Markdown parsing failed - retry without parse_mode
+                logger.warning(f"Markdown parse failed in send_message, retrying as plain text")
+                try:
+                    plain_text = text.replace('*', '').replace('_', '').replace('`', '')
+                    await self.application.bot.send_message(
+                        chat_id=self.chat_id,
+                        text=plain_text,
+                        reply_markup=reply_markup,
+                        parse_mode=None,
+                        disable_web_page_preview=disable_preview,
+                    )
+                    return True
+                except Exception as retry_error:
+                    logger.error(f"Plain text retry also failed: {retry_error}")
+                    return False
+            else:
+                logger.error(f"Telegram send error: {e}")
+                return False
     
     async def _edit_or_reply(
         self,
@@ -270,6 +287,26 @@ class TelegramBot:
             # Ignore "message not modified" error - it's harmless
             if "not modified" in str(e).lower():
                 pass  # Silent ignore
+            elif "parse entities" in str(e).lower() or "can't find end" in str(e).lower():
+                # Markdown parsing failed - retry without parse_mode
+                logger.warning(f"Markdown parse failed, retrying as plain text: {e}")
+                try:
+                    # Remove markdown formatting chars for plain text
+                    plain_text = text.replace('*', '').replace('_', '').replace('`', '')
+                    if update.callback_query:
+                        await update.callback_query.edit_message_text(
+                            text=plain_text,
+                            reply_markup=reply_markup,
+                            parse_mode=None,
+                        )
+                    elif update.message:
+                        await update.message.reply_text(
+                            text=plain_text,
+                            reply_markup=reply_markup,
+                            parse_mode=None,
+                        )
+                except Exception as retry_error:
+                    logger.error(f"Plain text retry also failed: {retry_error}")
             else:
                 logger.error(f"Message error: {e}")
     

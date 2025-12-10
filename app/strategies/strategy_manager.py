@@ -251,6 +251,14 @@ class StrategyManager:
             signal: Original signal
             result: Execution result
         """
+        # Defensive: ensure signal and result are dicts
+        if not isinstance(signal, dict):
+            logger.warning(f"record_trade_execution: signal is not a dict: {type(signal)}")
+            return
+        if not isinstance(result, dict):
+            logger.warning(f"record_trade_execution: result is not a dict: {type(result)}")
+            return
+        
         strategy_name = signal.get('strategy')
         
         if strategy_name in self.strategy_stats:
