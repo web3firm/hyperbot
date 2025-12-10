@@ -326,11 +326,12 @@ class DivergenceDetector:
             return 0.5
         
         price_change_pct = abs((price2 - price1) / price1 * 100)
-        ind_change_pct = abs((ind2 - ind1) / abs(ind1) * 100) if ind1 != 0 else 0
+        ind_change_pct = abs((ind2 - ind1) / abs(ind1) * 100) if ind1 != 0 else Decimal('0')
         
         # Divergence = opposite directions
         # Stronger when both changes are significant
-        combined_move = (float(price_change_pct) + ind_change_pct) / 2
+        # Ensure all values are float to avoid Decimal/float mixing
+        combined_move = (float(price_change_pct) + float(ind_change_pct)) / 2
         
         # Normalize to 0-1 (5% move = 1.0 strength)
         strength = min(1.0, combined_move / 5.0)
