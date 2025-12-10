@@ -374,6 +374,10 @@ class MessageFormatter:
         Args:
             signal: Signal dict with entry, tp, sl, score, reason, etc.
         """
+        # Defensive: ensure signal is a dict
+        if not isinstance(signal, dict):
+            return f"⚠️ Invalid signal format: {type(signal)}"
+        
         side = signal.get('side', 'buy').upper()
         side_emoji = "🟢 LONG" if side == 'BUY' else "🔴 SHORT"
         

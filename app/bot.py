@@ -1047,6 +1047,11 @@ class HyperAIBot:
                 signal = await strategy.generate_signal(market_data, account_state)
                 
                 if signal:
+                    # Validate signal is a dict
+                    if not isinstance(signal, dict):
+                        logger.warning(f"⚠️ {symbol} signal is {type(signal)}, not dict - skipping")
+                        continue
+                    
                     # Record signal time for cooldown
                     self.asset_manager.record_signal(symbol)
                     logger.info(f"🌐 Multi-Asset Signal: {symbol} {signal.get('signal_type', 'UNKNOWN')}")
@@ -1286,6 +1291,15 @@ class HyperAIBot:
                         
                         # Generate signal from strategy (single symbol mode)
                         signal = await self.strategy.generate_signal(market_data, account_state)
+                    
+                    # DEFENSIVE: Ensure signal is a valid dict before processing
+                    if signal:
+                        if isinstance(signal, str):
+                            logger.warning(f"⚠️ Signal is string, not dict: {signal[:100]}")
+                            signal = None
+                        elif not isinstance(signal, dict):
+                            logger.warning(f"⚠️ Signal is {type(signal)}, not dict")
+                            signal = None
                     
                     if signal:
                         # ==================== RECOVERY MODE CHECK ====================

@@ -1822,6 +1822,11 @@ class TelegramBot:
         if not self.notify_signals or not self._can_send('signal'):
             return
         
+        # Defensive: ensure signal is a dict
+        if not isinstance(signal, dict):
+            logger.warning(f"notify_signal received non-dict: {type(signal)}")
+            return
+        
         message = self.fmt.format_signal_notification(signal)
         await self.send_message(message)
     
