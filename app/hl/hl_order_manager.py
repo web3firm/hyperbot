@@ -959,15 +959,30 @@ class HLOrderManager:
         if isinstance(data, str):
             data = {}
         statuses = data.get('statuses', []) if isinstance(data, dict) else []
+        
+        # Check for error in statuses
         if statuses and 'error' in statuses[0]:
             logger.error(f"Entry error: {statuses[0]['error']}")
-            return {'status': 'error', 'message': statuses[0]['error']}
+            return {'status': 'error', 'message': statuses[0]['error'], 'error': statuses[0]['error']}
+        
+        # CRITICAL: Verify order actually filled - check for 'filled' in status
+        if not statuses or 'filled' not in statuses[0]:
+            # Order was not filled - might be rejected or pending
+            if statuses and 'resting' in statuses[0]:
+                logger.warning(f"⚠️ Order resting (not filled immediately): {statuses[0]}")
+                return {'status': 'error', 'message': 'Order resting - not filled', 'error': 'Order not filled'}
+            else:
+                logger.error(f"❌ Order not filled - no fill confirmation in response: {statuses}")
+                return {'status': 'error', 'message': 'No fill confirmation', 'error': 'Order not filled'}
         
         # Get actual filled size from response
-        filled_size = size  # Default to requested
-        if statuses and 'filled' in statuses[0]:
-            filled_info = statuses[0]['filled']
-            filled_size = float(filled_info.get('totalSz', size))
+        filled_info = statuses[0]['filled']
+        filled_size = float(filled_info.get('totalSz', size))
+        
+        # Verify we actually got a fill
+        if filled_size <= 0:
+            logger.error(f"❌ Order filled with zero size: {filled_info}")
+            return {'status': 'error', 'message': 'Zero fill size', 'error': 'No fill'}
         
         logger.info(f"✅ Entry filled: {filled_size} {symbol}")
         
@@ -1017,6 +1032,19 @@ class HLOrderManager:
             None, 
             lambda: self.market_open_with_stops(symbol, is_buy, size_float, tp_float, sl_float, entry_price=entry_float)
         )
+        
+        # DEFENSIVE: Ensure result is a dict
+        if isinstance(result, str):
+            logger.error(f"market_open_with_stops returned string: {result[:200]}")
+            return {'success': False, 'error': result, 'result': {'status': 'error', 'message': result}}
+        if not isinstance(result, dict):
+            logger.error(f"market_open_with_stops returned unexpected type: {type(result)}")
+            return {'success': False, 'error': str(result), 'result': {'status': 'error', 'message': str(result)}}
+        
+        # Log the full result for debugging
+        logger.info(f"📋 Order result status: {result.get('status')}")
+        if result.get('error'):
+            logger.error(f"❌ Order error: {result.get('error')}")
         
         # Log TPSL results
         tpsl = result.get('tpsl', [])
